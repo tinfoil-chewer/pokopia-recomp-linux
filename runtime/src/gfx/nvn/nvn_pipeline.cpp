@@ -194,6 +194,12 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             code = &fixed;
         }
     }
+    // Every Location output of a vertex / tessellation evaluation / geometry shader starts at (0,0,0,1) as on the console: a component the
+    // shader never writes is undefined in Vulkan, and RADV hands NaN where AMD's Windows driver hands 0 (spirv_init_outputs). Every
+    // module goes through here, the ones spirv_add_outputs / spirv_gs_passthrough rewrote included. [nvn] init_outputs = false: off (A/B).
+    static const bool init_outputs = config_get_bool("nvn", "init_outputs", true);
+    std::vector<uint32_t> initialised;
+    if (init_outputs && spirv_init_outputs(*code, initialised)) code = &initialised;
     // [nvn] spirv_salt (measurement only): an OpSourceExtension with the salt in every module gives the driver a new shader hash, so a run
     // compiles every shader from scratch without touching the driver's own cache on disk.
     static const std::string salt = config_get_str("nvn", "spirv_salt", "");

@@ -723,3 +723,144 @@ std::vector<SpvIntSlot> spirv_predict_int_inputs(const std::vector<uint32_t>& in
 }
 
 }  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn::be::gpu {
+
+bool spirv_init_outputs(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    enum : uint32_t { OpLineOp = 8, OpTypeArrayOp = 28, OpConstantOp = 43, OpConstantCompositeOp = 44, OpStoreOp = 62, OpLabelOp = 248,
+                      OpNoLineOp = 317, OpEmitVertexOp = 218, OpEmitStreamVertexOp = 220, DecBuiltIn = 11, DecComponent = 31,
+                      ModelVertex = 0, ModelTessEval = 2, ModelGeometry = 3 };
+    if (in.size() < 5) return false;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    uint32_t bound = in[3];
+    size_t entry_at = 0, first_function = 0;
+    uint32_t entries = 0;
+    struct Scalar { bool is_float; uint32_t width; };
+    std::map<uint32_t, Scalar> scalars;                                   // OpTypeFloat / OpTypeInt id -> kind, width
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> vec_of;             // vector type -> (component type, count)
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> array_of;           // array type -> (element type, length constant id)
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> ptr_of;             // pointer type -> (storage class, pointee)
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> constants;          // (type, value) -> OpConstant id (one-word ones)
+    std::map<uint32_t, uint32_t> const_value, location, component;
+    std::map<uint32_t, bool> builtin;
+    std::vector<std::pair<uint32_t, uint32_t>> output_vars;               // (variable id, pointer type) in declaration order
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpEntryPoint && n.len >= 4) { if (!entries++) entry_at = n.at; }
+        else if (n.op == OpFunction) { if (!first_function) first_function = n.at; }
+        else if (n.op == OpTypeFloat && n.len >= 3) scalars[w[1]] = {true, w[2]};
+        else if (n.op == OpTypeInt && n.len == 4) scalars[w[1]] = {false, w[2]};
+        else if (n.op == OpTypeVector && n.len == 4) vec_of[w[1]] = {w[2], w[3]};
+        else if (n.op == OpTypeArrayOp && n.len == 4) array_of[w[1]] = {w[2], w[3]};
+        else if (n.op == OpTypePointer && n.len == 4) ptr_of[w[1]] = {w[2], w[3]};
+        else if (n.op == OpConstantOp && n.len == 4) { const_value[w[2]] = w[3]; constants.emplace(std::make_pair(w[1], w[3]), w[2]); }
+        else if (n.op == OpDecorate && n.len >= 4 && w[2] == DecorationLocation) location[w[1]] = w[3];
+        else if (n.op == OpDecorate && n.len >= 4 && w[2] == DecComponent) component[w[1]] = w[3];
+        else if (n.op == OpDecorate && n.len >= 3 && w[2] == DecBuiltIn) builtin[w[1]] = true;
+        else if (n.op == OpVariable && n.len == 4 && w[3] == StorageOutput && !first_function) output_vars.emplace_back(w[2], w[1]);   // no initializer
+    }
+    if (entries != 1 || !first_function) return false;
+    const uint32_t* ep = &in[entry_at];
+    const uint32_t ep_len = in[entry_at] >> 16, model = ep[1], entry_func = ep[2];
+    if (model != ModelVertex && model != ModelTessEval && model != ModelGeometry) return false;
+    // OpEntryPoint model id name... interface ids: the name is a literal string. Only a variable the entry point lists is stored to (before
+    // SPIR-V 1.4 the list must hold every Output variable the entry point uses).
+    std::map<uint32_t, bool> in_interface;
+    {
+        const char* nm = reinterpret_cast<const char*>(&ep[3]);
+        size_t chars = 0;
+        while (chars < (ep_len - 3) * 4 && nm[chars]) ++chars;
+        for (size_t k = 3 + chars / 4 + 1; k < ep_len; ++k) in_interface[ep[k]] = true;
+    }
+
+    // The value each output starts with: component 3 is 1, the others 0 (1.0f for a float, 1 for an integer), counted from the variable's
+    // Component decoration. An Output array of such vectors gets it in every element. New constants get ids from the bound.
+    std::vector<uint32_t> decls;
+    auto scalar_const = [&](uint32_t type, uint32_t value) -> uint32_t {
+        auto it = constants.find({type, value});
+        if (it != constants.end()) return it->second;
+        const uint32_t id = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpConstantOp, type, id, value});
+        constants[{type, value}] = id;
+        return id;
+    };
+    std::map<std::vector<uint32_t>, uint32_t> composites;                 // (type, constituents...) -> OpConstantComposite id
+    auto composite_const = [&](uint32_t type, const std::vector<uint32_t>& parts) -> uint32_t {
+        std::vector<uint32_t> key{type};
+        key.insert(key.end(), parts.begin(), parts.end());
+        auto it = composites.find(key);
+        if (it != composites.end()) return it->second;
+        const uint32_t id = bound++;
+        decls.push_back(((3u + static_cast<uint32_t>(parts.size())) << 16) | OpConstantCompositeOp);
+        decls.push_back(type);
+        decls.push_back(id);
+        decls.insert(decls.end(), parts.begin(), parts.end());
+        composites[key] = id;
+        return id;
+    };
+    // the start value of a scalar or vector of 32-bit float / int whose first component sits in slot `first`; 0 for any other type
+    auto start_value = [&](uint32_t type, uint32_t first) -> uint32_t {
+        uint32_t comp = type, count = 1;
+        const bool vector = vec_of.count(type) != 0;
+        if (vector) { comp = vec_of[type].first; count = vec_of[type].second; }
+        auto sc = scalars.find(comp);
+        if (sc == scalars.end() || sc->second.width != 32 || count < 1 || count > 4) return 0;
+        const uint32_t one = sc->second.is_float ? 0x3f800000u : 1u;
+        std::vector<uint32_t> parts;
+        for (uint32_t c = 0; c < count; ++c) parts.push_back(scalar_const(comp, first + c == 3 ? one : 0u));
+        return vector ? composite_const(type, parts) : parts[0];
+    };
+    std::vector<uint32_t> stores;
+    for (const auto& [var, ptr] : output_vars) {
+        if (!location.count(var) || builtin.count(var) || !in_interface.count(var)) continue;
+        auto p = ptr_of.find(ptr);
+        if (p == ptr_of.end() || p->second.first != StorageOutput) continue;
+        const uint32_t type = p->second.second, first = component.count(var) ? component[var] : 0u;
+        uint32_t value = 0;
+        if (array_of.count(type)) {
+            const auto [elem, len_id] = array_of[type];
+            if (!const_value.count(len_id) || const_value[len_id] == 0 || const_value[len_id] > 64) continue;
+            const uint32_t e = start_value(elem, first);
+            if (!e) continue;
+            value = composite_const(type, std::vector<uint32_t>(const_value[len_id], e));
+        } else {
+            value = start_value(type, first);
+        }
+        if (value) stores.insert(stores.end(), {(3u << 16) | OpStoreOp, var, value});
+    }
+    if (stores.empty()) return false;
+
+    // the stores open the entry function, behind the leading OpVariable run of its first block
+    size_t insert_at = 0;
+    for (size_t k = 0; k < insts.size() && !insert_at; ++k) {
+        if (insts[k].op != OpFunction || in[insts[k].at + 2] != entry_func) continue;
+        size_t j = k + 1;
+        while (j < insts.size() && insts[j].op != OpLabelOp && insts[j].op != OpFunction) ++j;
+        if (j >= insts.size() || insts[j].op != OpLabelOp) return false;
+        ++j;
+        while (j < insts.size() && (insts[j].op == OpVariable || insts[j].op == OpLineOp || insts[j].op == OpNoLineOp)) ++j;
+        if (j < insts.size()) insert_at = insts[j].at;
+    }
+    if (!insert_at) return false;
+
+    out.clear();
+    out.reserve(in.size() + decls.size() + stores.size() * 4 + 8);
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    for (const Inst& n : insts) {
+        if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
+        if (n.at == insert_at) out.insert(out.end(), stores.begin(), stores.end());
+        out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
+        // a geometry shader's outputs are undefined again after every emitted vertex
+        if (model == ModelGeometry && (n.op == OpEmitVertexOp || n.op == OpEmitStreamVertexOp)) out.insert(out.end(), stores.begin(), stores.end());
+    }
+    out[3] = bound;
+    return true;
+}
+
+}  // namespace nxrt::nvn::be::gpu

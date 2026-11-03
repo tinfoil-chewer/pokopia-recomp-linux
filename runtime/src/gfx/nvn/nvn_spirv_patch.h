@@ -14,6 +14,12 @@
 //                       bytes), tightly packed. The console's layout lives in the driver's compile data; this is the layout the
 //                       game's stream-out shaders use (docs/S4e.md).
 //
+//   spirv_init_outputs  a vertex, tessellation evaluation or geometry shader that writes only some components of a Location output (the
+//                       sky dome's vertex shader stores .w of one vec4 and .xyz of others) while the next stage reads all four. The
+//                       console (and Ryujinx) start every user output at (0,0,0,1); in Vulkan an unwritten component is undefined: AMD's
+//                       Windows driver happens to hand 0, Mesa RADV hands garbage (a NaN that blacks out the HDR frame). The entry point
+//                       now stores (0,0,0,1) to every Location output first, and a geometry shader again after each emitted vertex.
+//
 // The idea (pattern-matching on the module's declarations, new ids from the bound) follows SuperMarioWonderRecomp's
 // nvn_spirv_patch.cpp (MIT); the code is new.
 #pragma once
@@ -65,6 +71,13 @@ bool spirv_dual_source_output(const std::vector<uint32_t>& in, std::vector<uint3
 // the entry point's interface loses them before SPIR-V 1.4). False (out untouched) when no Location output exists or a built-in output
 // (FragDepth, SampleMask) does.
 bool spirv_outputs_to_private(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+
+// Stores the console's start value (component 3 = 1, the others 0, counted from the Component decoration; 1.0f for floats, 1 for
+// integers) to every Location output a Vertex / TessellationEvaluation / Geometry entry point lists, right after the leading OpVariables
+// of its first block, and in a geometry shader again after every OpEmitVertex / OpEmitStreamVertex. Covers scalars and vectors of 32-bit
+// float / int and Output arrays of them; built-ins are left alone. False (out untouched) for another stage, an unexpected module or
+// nothing to initialise.
+bool spirv_init_outputs(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
 struct SpvXfbOutput {
     uint32_t location, components, offset;   // offset in bytes inside a captured vertex
