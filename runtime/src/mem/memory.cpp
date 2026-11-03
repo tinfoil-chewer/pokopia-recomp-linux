@@ -429,6 +429,23 @@ bool is_mapped(uint64_t addr, uint64_t size) {
 // ---------------------------------------------------------------------------------------------------------------------
 // heap section
 
+// [mem] heap_section = reserve | commit | auto (default). reserve: a SEC_RESERVE section, committed by heap_commit (Windows). commit: a
+// SEC_COMMIT section made PAGE_NOACCESS at once, and heap_commit only makes pages read-write; the guest sees no difference. auto: commit
+// under Wine, reserve on Windows. Under Wine every VirtualProtect and VirtualQuery on a view of a SEC_RESERVE section asks wineserver
+// which pages are committed, holding ntdll's process-wide virtual memory lock meanwhile: with page write tracking (write_watch.cpp: a
+// VirtualProtect per write fault and per arm) that lock and the server round trips serialise every thread that writes tracked memory.
+// Wine backs both kinds with a sparse file, so memory is only used where pages are touched.
+static bool heap_section_commit() {
+    static const bool v = [] {
+        const std::string s = config_get_str("mem", "heap_section", "auto");
+        if (s == "commit") return true;
+        if (s == "reserve") return false;
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        return nt && GetProcAddress(nt, "wine_get_version") != nullptr;
+    }();
+    return v;
+}
+
 bool heap_create(uint64_t reserve_bytes) {
     if (!initialised() && !init()) return false;
     std::lock_guard lk(g_heap_mu);
@@ -445,7 +462,8 @@ bool heap_create(uint64_t reserve_bytes) {
                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(kHeapMax));
         return false;
     }
-    HANDLE sec = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE,
+    const bool commit = heap_section_commit();
+    HANDLE sec = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | (commit ? SEC_COMMIT : SEC_RESERVE),
                                     static_cast<DWORD>(size >> 32), static_cast<DWORD>(size & 0xFFFFFFFFu), nullptr);
     if (!sec) {
         DWORD e = GetLastError();
@@ -468,13 +486,21 @@ bool heap_create(uint64_t reserve_bytes) {
         CloseHandle(sec);
         return false;
     }
+    DWORD was = 0;
+    if (commit && !VirtualProtect(v, static_cast<SIZE_T>(size), PAGE_NOACCESS, &was)) {   // nothing is committed for the guest yet
+        DWORD e = GetLastError();
+        NXLOG_E(kTag, "heap_create: VirtualProtect(PAGE_NOACCESS) of the committed section failed, error %lu", static_cast<unsigned long>(e));
+        UnmapViewOfFile(v);
+        CloseHandle(sec);
+        return false;
+    }
     g_section = sec;
     g_heap_size = size;
     g_commit_bits.assign((size / kPage + 63) / 64, 0);
     g_heap_cls.assign(static_cast<size_t>(size / kPage), 0);
     g_committed = 0;
-    NXLOG_I(kTag, "heap: section of %llu MiB, primary view at %llx", static_cast<unsigned long long>(size >> 20),
-            static_cast<unsigned long long>(kHeapBase));
+    NXLOG_I(kTag, "heap: section of %llu MiB (%s), primary view at %llx", static_cast<unsigned long long>(size >> 20),
+            commit ? "SEC_COMMIT, [mem] heap_section" : "SEC_RESERVE", static_cast<unsigned long long>(kHeapBase));
     return true;
 }
 
@@ -504,8 +530,10 @@ bool heap_commit(uint64_t offset, uint64_t size) {
     const uint64_t start = offset & ~(kPage - 1);
     const uint64_t end = align_up(offset + size, kPage);
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // MEM_COMMIT makes committed pages read-write again
-    if (!VirtualAlloc(reinterpret_cast<void*>(kHeapBase + start), static_cast<SIZE_T>(end - start), MEM_COMMIT,
-                      PAGE_READWRITE)) {
+    DWORD was = 0;
+    if (heap_section_commit() ? !VirtualProtect(reinterpret_cast<void*>(kHeapBase + start), static_cast<SIZE_T>(end - start), PAGE_READWRITE, &was)
+                              : !VirtualAlloc(reinterpret_cast<void*>(kHeapBase + start), static_cast<SIZE_T>(end - start), MEM_COMMIT,
+                                              PAGE_READWRITE)) {
         DWORD e = GetLastError();
         NXLOG_E(kTag, "heap_commit [%llx, +%llx): VirtualAlloc failed, error %lu",
                 static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start),
