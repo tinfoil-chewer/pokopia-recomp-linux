@@ -30,7 +30,7 @@ NXTEST(sac_services_are_all_registered) {
     CHECK_EQ(sizeof(sac) / sizeof(sac[0]), 47u);   // 47 names: the list printed by the dump parser has one more entry than the plan's "46"
     for (const char* name : sac) CHECK_MSG(std::find(n.begin(), n.end(), name) != n.end(), std::string("not registered: ") + name);
     // The SDK's client library also reaches these without the title being allowed to use them; they exist so nothing falls over.
-    for (const char* name : {"set:sys", "psm", "fatal:u", "time:a", "time:s"}) CHECK_MSG(std::find(n.begin(), n.end(), name) != n.end(), std::string("not registered: ") + name);
+    for (const char* name : {"set:sys", "psm", "fatal:u", "time:a", "time:s", "ngc:u"}) CHECK_MSG(std::find(n.begin(), n.end(), name) != n.end(), std::string("not registered: ") + name);
 }
 
 NXTEST(sac_services_answer_an_unknown_command_without_crashing) {

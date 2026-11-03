@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Offline network services (S3c): nifm, bsd, bsdcfg, ssl, nim:eca, friend, prepo, pctl, bcat, ldn, nsd, sfdnsres, ntc, ngct, notif.
+// Offline network services (S3c): nifm, bsd, bsdcfg, ssl, nim:eca, friend, prepo, pctl, bcat, ldn, nsd, sfdnsres, ntc, ngct, ngc, notif.
 // The console has no network connection, no friends and no BCAT data. Every command answers what a console in that state gives.
 // Adapted from ScarletNX (GPL-3.0-or-later): src/nx/hle/services/network/nifm.swipc, bsd.swipc, ssl.swipc, dns.swipc, ldn.swipc and
 //   src/nx/hle/services/misc.swipc (pctl, friend, prepo, bcat, ngct, nsd). Command ids, names and layouts.
@@ -1231,6 +1231,32 @@ std::shared_ptr<ipc::Service> make_ngct() {
 }
 
 // =============================================================================================================================================
+// ngc: ngc:u (nn::ngc::detail::IService), the profanity filter behind nn::ngc::ProfanityFilter. No word list: Check finds nothing and
+// Mask returns the text as it was sent, with no word masked. Pokopia's name check (the keyboard's text check) calls Mask (cmd 2, text in
+// buffer A, masked text in buffer B) and refuses the name when the call fails: with the generic stub's error every name was "a word or
+// character that isn't allowed" and the keyboard reopened forever (fork issue #6).
+// =============================================================================================================================================
+
+std::shared_ptr<ipc::Service> make_ngc() {
+    return make_iface("nn::ngc::detail::IService", [](ipc::Service& s) {
+        rows(s, "ngc", {
+            {0, "GetContentVersion", K::U32, 1},
+            {1, "Check", K::U32, 0},              // u32 mask of the checks that matched: none
+            {3, "Reload", K::Ok},
+        });
+        cmd(s, "ngc", 2, "Mask", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const ipc::Buffer in = req.in_buf(0);
+            const ipc::Buffer out = req.out_buf(0);
+            std::vector<uint8_t> tmp(static_cast<size_t>(in.size));
+            const uint64_t n = buf_read(in, tmp.data(), in.size);
+            buf_write(out, tmp.data(), n);
+            rsp.push(static_cast<uint32_t>(0));   // words masked
+            return 0;
+        });
+    });
+}
+
+// =============================================================================================================================================
 // notif: notif:a (INotificationServicesForApplication). No alarms; Initialize accepted.
 // =============================================================================================================================================
 
@@ -1268,6 +1294,7 @@ void register_network() {
     add("sfdnsres", [] { return make_resolver(); });
     add("ntc", [] { return make_ntc_static(); });
     add("ngct:u", [] { return make_ngct(); });
+    add("ngc:u", [] { return make_ngc(); });
     add("notif:a", [] { return make_notif(); });
 }
 

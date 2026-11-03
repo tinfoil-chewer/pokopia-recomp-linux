@@ -391,6 +391,49 @@ NXTEST(am_swkbd_packed_config_utf8) {
     clear_config();
 }
 
+// With use_text_check on (0x48D of the 0x530 config), the text goes to the game's check first, in the config's encoding: UTF-8 "Josh"
+// with its byte size (NUL included). Before this, UTF-16 here made the game read "J" and refuse the name (fork issue #6).
+NXTEST(am_swkbd_text_check_utf8) {
+    nxsvc::Env env;
+    config_set("applet", "swkbd_text", "Josh");
+    nxsvc::Session proxy = open_proxy();
+    REQUIRE(proxy.valid());
+    nxsvc::Session creator = proxy.sub(proxy.call(11));
+    REQUIRE(creator.valid());
+    nxsvc::Session kb = creator.sub(creator.call(0, nxsvc::Args().u32(0x11).u32(0)));
+    REQUIRE(kb.valid());
+    std::vector<uint8_t> common(0x20, 0), cfg(0x530, 0);
+    const uint32_t version = 0x140010, max_len = 12;
+    std::memcpy(common.data() + 8, &version, 4);
+    std::memcpy(cfg.data() + 0x3AC, &max_len, 4);
+    cfg[0x3AA] = 1;                                   // use_utf8
+    cfg[0x48D] = 1;                                   // use_text_check
+    CHECK_EQ(kb.call(100, nxsvc::Args().hmove(make_storage(creator, common))).result, 0u);
+    CHECK_EQ(kb.call(100, nxsvc::Args().hmove(make_storage(creator, cfg))).result, 0u);
+    CHECK_EQ(kb.call(10).result, 0u);
+    {
+        nxsvc::Reply check = kb.call(104);           // PopInteractiveOutData: the text check request
+        REQUIRE(check.ok());
+        nxsvc::Session cs = kb.sub(check);
+        nxsvc::Session acc = cs.sub(cs.call(0));
+        uint8_t buf[16] = {0xEE};
+        CHECK_EQ(acc.call(11, nxsvc::Args().i64(0).buf_b(buf, sizeof buf)).result, 0u);
+        const uint8_t want[16] = {5, 0, 0, 0, 0, 0, 0, 0, 'J', 'o', 's', 'h', 0, 0, 0, 0};   // u64 size 5, then UTF-8 with its NUL
+        CHECK(std::memcmp(buf, want, sizeof want) == 0);
+    }
+    std::vector<uint8_t> verdict(0x7D8, 0);           // SwkbdTextCheck: Success
+    CHECK_EQ(kb.call(103, nxsvc::Args().hmove(make_storage(creator, verdict))).result, 0u);
+    nxsvc::Reply out = kb.call(101);
+    REQUIRE(out.ok());
+    nxsvc::Session os = kb.sub(out);
+    nxsvc::Session acc = os.sub(os.call(0));
+    uint8_t buf[12] = {0xEE};
+    CHECK_EQ(acc.call(11, nxsvc::Args().i64(0).buf_b(buf, sizeof buf)).result, 0u);
+    const uint8_t want[12] = {0, 0, 0, 0, 'J', 'o', 's', 'h', 0, 0, 0, 0};   // SwkbdResult Ok, then UTF-8
+    CHECK(std::memcmp(buf, want, sizeof want) == 0);
+    clear_config();
+}
+
 NXTEST(am_desired_language) {
     nxsvc::Env env;
     clear_config();

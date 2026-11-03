@@ -672,6 +672,17 @@ std::string read_u16_text(const Bytes& b, size_t off, size_t chars) {
     return utf16_to_utf8(t);
 }
 
+// A NUL-terminated UTF-8 string of at most `bytes` bytes at `off` (control characters dropped, as in read_u16_text).
+std::string read_u8_text(const Bytes& b, size_t off, size_t bytes) {
+    std::string t;
+    for (size_t i = 0; i < bytes && off + i < b.size(); ++i) {
+        const char c = static_cast<char>(b[off + i]);
+        if (c == 0) break;
+        if (static_cast<uint8_t>(c) >= 0x20 || c == '\n') t.push_back(c);
+    }
+    return t;
+}
+
 std::atomic<bool>& prompt_flag() {
     static std::atomic<bool> on{false};
     return on;
@@ -743,6 +754,8 @@ void swkbd_answer(AppletState& a, bool ok) {
         return;
     }
     auto out = std::make_shared<Bytes>(8 + kSwkbdStringSize, uint8_t{0});
+    // The text check uses the config's encoding, like the final result: with use_utf8 the game reads UTF-8 here too (and answers in
+    // UTF-8). UTF-16 "Josh" read as UTF-8 is "J" then NULs, which the game's name check refuses.
     const uint64_t size = a.utf8 ? utf16_to_utf8(a.text).size() + 1 : (a.text.size() + 1) * 2;
     std::memcpy(out->data(), &size, 8);
     put_text(out->data() + 8, kSwkbdStringSize, a.text, a.utf8);
@@ -843,7 +856,8 @@ void swkbd_interactive(const std::shared_ptr<AppletState>& ap) {
         swkbd_submit(a, kSwkbdResultOk);
         return;
     }
-    const std::string why = read_u16_text(*d, 4, kSwkbdStringSize / 2);
+    // The game's message comes in the config's encoding: read as UTF-16, its UTF-8 bytes turned into CJK characters.
+    const std::string why = a.utf8 ? read_u8_text(*d, 4, kSwkbdStringSize) : read_u16_text(*d, 4, kSwkbdStringSize / 2);
     NXLOG_W("am", "swkbd: the game rejected the text (text check result %u: \"%s\")", check, why.c_str());
     if (prompt_flag().load() && !nxrt::config_has("applet", "swkbd_text")) {
         if (!why.empty()) a.req.guide = why;

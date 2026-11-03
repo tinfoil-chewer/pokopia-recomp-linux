@@ -203,6 +203,20 @@ NXTEST(ngct_returns_text_unchanged) {
     CHECK(std::memcmp(out, "hello", 5) == 0);
 }
 
+// Pokopia's name check calls ngc:u Mask (text in buffer A, masked text in buffer B) and refuses the name if it fails (fork issue #6).
+NXTEST(ngc_masks_nothing) {
+    nxsvc::Env env;
+    nxsvc::Session ngc = nxsvc::connect("ngc:u");
+    REQUIRE(ngc.valid());
+    char text[] = "Josh";
+    CHECK_EQ(ngc.call(1, nxsvc::Args().buf_a(text, 5)).get<uint32_t>(0), 0u);   // Check: nothing matched
+    char out[8] = {};
+    nxsvc::Reply r = ngc.call(2, nxsvc::Args().buf_a(text, 5).buf_b(out, sizeof out));
+    CHECK_EQ(r.result, 0u);                                                     // Mask: success,
+    CHECK_EQ(r.get<uint32_t>(0), 0u);                                           // no word masked,
+    CHECK(std::memcmp(out, "Josh", 5) == 0);                                    // the text back
+}
+
 NXTEST(prepo_and_notif_accept) {
     nxsvc::Env env;
     nxsvc::Session prepo = nxsvc::connect("prepo:u");
