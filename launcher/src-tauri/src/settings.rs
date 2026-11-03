@@ -92,15 +92,47 @@ pub fn apply(dir: &Path, edits: &[Edit]) -> Result<(), String> {
 
 /// Used by Play and setup: the ini keys the launcher owns. pkp.exe reads every path from pkp.ini (a pkp.ini next to it makes
 /// the game folder its working directory), so it needs no command-line paths.
+/// A path as pkp.exe sees it. On Linux the game runs under Wine/Proton, where an absolute Linux path is only reachable
+/// through the Z: drive (/ of the Linux file system); a bare "/home/..." would be read as C:\\home\\....
+pub fn game_path(p: &str) -> String {
+    #[cfg(unix)]
+    if p.starts_with('/') {
+        return format!("Z:{}", p);
+    }
+    p.to_string()
+}
+
+/// game_path, but relative when `p` is inside the game folder (the game's working directory): such a folder can be copied to
+/// a Steam Deck or another drive and still work.
+pub fn game_path_in(dir: &Path, p: &str) -> String {
+    #[cfg(unix)]
+    if let Ok(rel) = Path::new(p).strip_prefix(dir) {
+        if !rel.as_os_str().is_empty() {
+            return rel.to_string_lossy().replace('\\', "/");
+        }
+    }
+    game_path(p)
+}
+
+/// The inverse of game_path, for checking a path the ini holds.
+fn host_path(p: &str) -> &str {
+    #[cfg(unix)]
+    if let Some(rest) = p.strip_prefix("Z:").or_else(|| p.strip_prefix("z:")) {
+        return rest;
+    }
+    p
+}
+
 pub fn ensure_play_paths(dir: &Path, exefs: &str, romfs: &str) -> Result<(), String> {
     let path = dir.join(PKP_INI);
     let mut ini = load(&path).unwrap_or_else(Ini::empty);
     let mut changed = !path.exists();
+    let (exefs, romfs) = (game_path_in(dir, exefs), game_path_in(dir, romfs));
 
     // [fs] exefs and [fs] romfs: kept while they name an existing folder (the user may have pointed them elsewhere)
-    for (key, value) in [("exefs", exefs), ("romfs", romfs)] {
+    for (key, value) in [("exefs", exefs.as_str()), ("romfs", romfs.as_str())] {
         let cur = ini.get("fs", key).unwrap_or_default();
-        let cur_path = Path::new(cur.trim());
+        let cur_path = Path::new(host_path(cur.trim()));
         // relative paths in the ini are relative to the game folder, the working directory of the game
         let cur_full = if cur_path.is_absolute() { cur_path.to_path_buf() } else { dir.join(cur_path) };
         if cur.trim().is_empty() || !cur_full.is_dir() {
@@ -116,8 +148,26 @@ pub fn ensure_play_paths(dir: &Path, exefs: &str, romfs: &str) -> Result<(), Str
     if cur_save.trim().is_empty() {
         let save = dir.join("save");
         let _ = fs::create_dir_all(&save);
+        // Linux: relative (the game folder is the game's working directory), so the folder can be copied to a Steam Deck
+        #[cfg(unix)]
+        ini.set("fs", "save_dir", "save");
+        #[cfg(not(unix))]
         ini.set("fs", "save_dir", &crate::dump::fwd(&save));
         changed = true;
+    }
+    #[cfg(unix)]
+    {
+        // shaders the game builds while it runs: recorded here, translated by the launcher's refresh (Play page)
+        if ini.get("nvn", "dump_missing").unwrap_or_default().trim().is_empty() {
+            ini.set("nvn", "dump_missing", "shader_cache/missing");
+            changed = true;
+        }
+        // Under Wine/Proton every write fault of the pool mirror's page tracking is a signal turned into a Windows
+        // exception (~0.4 ms); some scenes take ~200 a frame. Off: 17-98 fps -> a steady 160+ on an RTX 4070. Kept if set.
+        if ini.get("nvn", "pool_mirror").is_none() {
+            ini.set("nvn", "pool_mirror", "off");
+            changed = true;
+        }
     }
     if changed {
         write_atomic(&path, &ini.to_text())?;
