@@ -847,6 +847,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (HasSuffix(x, ".H0_H0")) r = [ctx.UnpackHalf2x16Low(v), ctx.UnpackHalf2x16Low(v)];
             else if (HasSuffix(x, ".H1_H1")) r = [ctx.UnpackHalf2x16High(v), ctx.UnpackHalf2x16High(v)];
             else if (HasSuffix(x, ".F32")) r = [v, v];
+            // .H0_NH1 (second operand of HADD2/HFMA2/HMUL2): the selector names the high lane first (.H1_H0 is the identity), so the
+            // high lane takes B.H0 and the low lane -B.H1. It used to fall through to the identity: no swap, no negation (drakolordx7/pokopia-recomp issue #3).
+            else if (HasSuffix(x, ".H0_NH1")) r = [ctx.FPAbsNeg(ctx.UnpackHalf2x16High(v), false, true), ctx.UnpackHalf2x16Low(v)];
             else r = [ctx.UnpackHalf2x16Low(v), ctx.UnpackHalf2x16High(v)];
             return FPAbsNeg(ctx, r, x.Abs, x.Neg);
         }
