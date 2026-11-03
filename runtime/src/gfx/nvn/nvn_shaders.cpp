@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -26,6 +27,8 @@
 #include <nxrt/config.h>
 #include <nxrt/gauge.h>
 #include <nxrt/log.h>
+
+#include <zstd.h>
 
 namespace nxrt::nvn::be {
 
@@ -859,7 +862,272 @@ std::string column_text(std::string_view line, int col) {
     return std::string(line.substr(start, tab == std::string_view::npos ? std::string_view::npos : tab - start));
 }
 
+// ---- the preload pack ---------------------------------------------------------------------------------------------
+// <dir>.preload.pack (shader_cache/spirv.preload.pack: beside the cache directory, not in it; under Wine a file name that is not there
+// costs a case-insensitive scan of its whole directory, 3 s for the 99k-file cache on a microSD card) holds the .spv files of the order
+// file in one file, in that order, each one zstd frame. Read as thousands of
+// separate files from a microSD card (the Steam Deck), the boot preload ran at ~15 MB/s and the game sat on a black screen for a minute
+// or more; the pack is ~4x smaller and is read front to back (pack_prefetch).
+// Layout, little endian: PackHeader, the frames, then `count` PackDiskEntry. line_hash is FNV-1a 64 of the shader's results.tsv line when
+// the entry was written: an entry whose line has changed since (the shader was translated again) is not used, its .spv file is.
+// The runtime writes the pack itself: when a run's boot preload is done and the order file lists shaders the pack lacks, a background
+// thread (lowest priority) writes <dir>.preload.pack.new from the pack's own frames and the missing .spv files; the next start renames it to
+// preload.pack before opening it (the open pack is never replaced under a running game). [nvn] shader_pack = 0: no pack, read or written.
+constexpr char kPackMagic[8] = {'N', 'X', 'S', 'P', 'A', 'C', 'K', '1'};
+constexpr uint32_t kPackVersion = 1;
+constexpr int kPackLevel = 6;            // zstd level: ~3.8x on SPIR-V at ~200 MB/s (level 19 is ~5x at ~5 MB/s)
+struct PackHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t count;
+    uint64_t index_offset;
+    uint64_t reserved;
+};
+struct PackDiskEntry {
+    char hash[16];
+    uint64_t line_hash;
+    uint64_t offset;
+    uint32_t csize;
+    uint32_t usize;
+};
+static_assert(sizeof(PackHeader) == 32 && sizeof(PackDiskEntry) == 40, "preload.pack layout");
+
+// <dir>.preload.pack<suffix>; a trailing separator of the cache directory is dropped, so the file stays beside the directory.
+std::string pack_path(std::string dir, const char* suffix) {
+    while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) dir.pop_back();
+    return dir + ".preload.pack" + suffix;
+}
+
+bool pack_enabled() {
+    static const bool on = nxrt::config_get_bool("nvn", "shader_pack", true);
+    return on;
+}
+
+uint64_t fnv1a64(std::string_view s) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+std::wstring widen(const std::string& s) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(std::max(n, 0)), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+// A positional read: threads share the handle (under Wine a pread; Windows serialises reads on a synchronous handle, still correct).
+bool read_at(void* file, uint64_t off, void* dst, uint32_t n) {
+    OVERLAPPED ov = {};
+    ov.Offset = static_cast<DWORD>(off);
+    ov.OffsetHigh = static_cast<DWORD>(off >> 32);
+    DWORD got = 0;
+    return ReadFile(static_cast<HANDLE>(file), dst, n, &got, &ov) && got == n;
+}
+
+uint64_t now_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 }  // namespace
+
+// open(), lock_ held: results_ and lines_ are in place.
+void ShaderCache::pack_open() {
+    if (!pack_enabled()) return;
+    const std::wstring path = widen(pack_path(dir_, "")), fresh = widen(pack_path(dir_, ".new"));
+    if (GetFileAttributesW(fresh.c_str()) != INVALID_FILE_ATTRIBUTES && !MoveFileExW(fresh.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+        NXLOG_W("nvn", "shader pack: preload.pack.new could not replace preload.pack (error %lu)", static_cast<unsigned long>(GetLastError()));
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    PackHeader h = {};
+    LARGE_INTEGER size = {};
+    const bool head_ok = GetFileSizeEx(f, &size) && read_at(f, 0, &h, sizeof h) && !std::memcmp(h.magic, kPackMagic, sizeof h.magic) &&
+                         h.version == kPackVersion && h.count <= 1000000 && h.index_offset >= sizeof h &&
+                         h.index_offset + uint64_t{h.count} * sizeof(PackDiskEntry) == static_cast<uint64_t>(size.QuadPart);
+    std::vector<PackDiskEntry> idx(head_ok ? h.count : 0);
+    if (!head_ok || (h.count && !read_at(f, h.index_offset, idx.data(), static_cast<uint32_t>(idx.size() * sizeof(PackDiskEntry))))) {
+        NXLOG_W("nvn", "shader pack: preload.pack is not a pack this runtime reads: the .spv files are read (and a new pack written)");
+        CloseHandle(f);
+        return;
+    }
+    size_t stale = 0;
+    uint64_t bytes = 0;
+    for (const PackDiskEntry& e : idx) {
+        std::string hash(e.hash, sizeof e.hash);
+        auto ln = lines_.find(hash);
+        if (ln == lines_.end() || fnv1a64(std::string_view(results_.data() + ln->second.first, ln->second.second)) != e.line_hash ||
+            e.offset < sizeof h || e.csize == 0 || e.offset + e.csize > h.index_offset || e.usize == 0 || e.usize % 4 || e.usize > (64u << 20)) {
+            stale++;
+            continue;
+        }
+        bytes += e.usize;
+        pack_.emplace(std::move(hash), PackEntry{e.offset, e.csize, e.usize});
+    }
+    pack_file_ = f;
+    pack_data_end_ = h.index_offset;
+    NXLOG_I("nvn", "shader pack: preload.pack has %zu shaders (%llu MiB of SPIR-V in %llu MiB)%s", pack_.size(),
+            static_cast<unsigned long long>(bytes >> 20), static_cast<unsigned long long>(h.index_offset >> 20),
+            stale ? (", " + std::to_string(stale) + " translated again since and read from their .spv files").c_str() : "");
+}
+
+bool ShaderCache::pack_read(const std::string& hash, std::string& out) {
+    if (!pack_file_) return false;
+    auto it = pack_.find(hash);
+    if (it == pack_.end()) return false;
+    const PackEntry& e = it->second;
+    thread_local std::string comp;
+    comp.resize(e.csize);
+    if (!read_at(pack_file_, e.offset, comp.data(), e.csize)) return false;
+    out.resize(e.usize);
+    const size_t n = ZSTD_decompress(out.data(), out.size(), comp.data(), comp.size());
+    if (ZSTD_isError(n) || n != e.usize) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+bool ShaderCache::read_spv(const std::string& hash, std::string& out) {
+    if (pack_read(hash, out)) {
+        pre_from_pack_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    pre_from_files_.fetch_add(1, std::memory_order_relaxed);
+    return read_file(dir_ + "/" + hash + ".spv", out);
+}
+
+// Reads the frames front to back on its own handle, ahead of the workers: one sequential read of the card, whose data the workers' reads
+// then find in the operating system's cache.
+void ShaderCache::pack_prefetch() {
+    log_set_thread_name("nvn-pack-read");
+    const uint64_t t0 = now_ms();
+    HANDLE f = CreateFileW(widen(pack_path(dir_, "")).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    std::vector<char> buf(8u << 20);
+    uint64_t off = 0;
+    while (off < pack_data_end_ && !pack_stop_.load(std::memory_order_relaxed)) {
+        DWORD got = 0;
+        const DWORD want = static_cast<DWORD>(std::min<uint64_t>(buf.size(), pack_data_end_ - off));
+        if (!ReadFile(f, buf.data(), want, &got, nullptr) || got == 0) break;
+        off += got;
+    }
+    CloseHandle(f);
+    const uint64_t ms = std::max<uint64_t>(1, now_ms() - t0);
+    NXLOG_I("nvn", "shader pack: read %llu MiB in %.1f s (%.0f MB/s)", static_cast<unsigned long long>(off >> 20), ms / 1000.0,
+            static_cast<double>(off) / 1000.0 / static_cast<double>(ms));
+}
+
+// The last preload worker, as it ends.
+void ShaderCache::preload_done() {
+    NXLOG_I("nvn", "shader preload: done after %.1f s (%llu .spv reads from preload.pack, %llu from separate files so far)",
+            (now_ms() - pre_start_ms_) / 1000.0, static_cast<unsigned long long>(pre_from_pack_.load()),
+            static_cast<unsigned long long>(pre_from_files_.load()));
+}
+
+// Started with the preload when the pack lacks shaders of the order file; writes once the preload is done (or after 90 s: workers wait
+// while the prepared shaders the game has not taken fill [nvn] shader_preload_mb, and may then never end), so the boot reads come first.
+void ShaderCache::pack_build(size_t missing) {
+    log_set_thread_name("nvn-pack-write");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    while (pre_live_.load() > 0 && now_ms() - pre_start_ms_ < 90000) {
+        if (pack_stop_.load()) return;
+        Sleep(250);
+    }
+    const uint64_t t0 = now_ms();
+    const std::string tmp_path = pack_path(dir_, ".tmp");
+    const std::wstring tmp = widen(tmp_path), out = widen(pack_path(dir_, ".new"));
+    NXLOG_I("nvn", "shader pack: writing preload.pack.new (%zu shaders of the order file, %zu not in preload.pack yet)", pre_list_.size(), missing);
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        NXLOG_W("nvn", "shader pack: cannot create %s (error %lu)", tmp_path.c_str(), static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    auto put = [f](const void* p, size_t n) {
+        DWORD w = 0;
+        return WriteFile(f, p, static_cast<DWORD>(n), &w, nullptr) && w == n;
+    };
+    PackHeader h = {};
+    std::memcpy(h.magic, kPackMagic, sizeof h.magic);
+    h.version = kPackVersion;
+    bool ok = put(&h, sizeof h);     // count and index_offset are filled in at the end
+    uint64_t off = sizeof h, raw_total = 0;
+    std::vector<PackDiskEntry> idx;
+    idx.reserve(pre_list_.size());
+    std::unordered_set<std::string> seen;
+    std::string raw, comp;
+    size_t reused = 0, compressed = 0, skipped = 0;
+    ZSTD_CCtx* cc = ZSTD_createCCtx();
+    for (const std::string& hash : pre_list_) {
+        if (!ok || !cc) break;
+        if (pack_stop_.load(std::memory_order_relaxed)) {
+            ok = false;
+            break;
+        }
+        if (hash.size() != sizeof(PackDiskEntry::hash) || !seen.insert(hash).second) continue;
+        PackDiskEntry e = {};
+        std::memcpy(e.hash, hash.data(), sizeof e.hash);
+        {
+            std::lock_guard lk(lock_);
+            auto ln = lines_.find(hash);
+            if (ln == lines_.end()) {
+                skipped++;
+                continue;
+            }
+            e.line_hash = fnv1a64(std::string_view(results_.data() + ln->second.first, ln->second.second));
+        }
+        if (auto it = pack_.find(hash); it != pack_.end()) {          // still current in the old pack: its frame as it is
+            comp.resize(it->second.csize);
+            if (!read_at(pack_file_, it->second.offset, comp.data(), it->second.csize)) {
+                skipped++;
+                continue;
+            }
+            e.usize = it->second.usize;
+            reused++;
+        } else {
+            if (!read_file(dir_ + "/" + hash + ".spv", raw) || raw.empty() || raw.size() % 4 || raw.size() > (64u << 20)) {
+                skipped++;
+                continue;
+            }
+            comp.resize(ZSTD_compressBound(raw.size()));
+            const size_t n = ZSTD_compressCCtx(cc, comp.data(), comp.size(), raw.data(), raw.size(), kPackLevel);
+            if (ZSTD_isError(n)) {
+                skipped++;
+                continue;
+            }
+            comp.resize(n);
+            e.usize = static_cast<uint32_t>(raw.size());
+            compressed++;
+        }
+        e.offset = off;
+        e.csize = static_cast<uint32_t>(comp.size());
+        ok = put(comp.data(), comp.size());
+        off += comp.size();
+        raw_total += e.usize;
+        idx.push_back(e);
+    }
+    if (cc) ZSTD_freeCCtx(cc);
+    ok = ok && cc && !idx.empty();
+    if (ok) {
+        h.count = static_cast<uint32_t>(idx.size());
+        h.index_offset = off;
+        LARGE_INTEGER zero = {};
+        ok = put(idx.data(), idx.size() * sizeof(PackDiskEntry)) && SetFilePointerEx(f, zero, nullptr, FILE_BEGIN) && put(&h, sizeof h);
+    }
+    ok = ok && FlushFileBuffers(f);   // on the card before the rename: a card pulled early leaves the old pack, never half a new one
+    CloseHandle(f);
+    if (!ok || !MoveFileExW(tmp.c_str(), out.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        if (!pack_stop_.load()) NXLOG_W("nvn", "shader pack: writing preload.pack.new failed (error %lu)", static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    NXLOG_I("nvn", "shader pack: wrote preload.pack.new in %.1f s: %zu shaders (%zu from preload.pack, %zu compressed, %zu skipped), "
+                   "%llu MiB of SPIR-V in %llu MiB; it is used from the next start", (now_ms() - t0) / 1000.0, idx.size(), reused, compressed, skipped,
+            static_cast<unsigned long long>(raw_total >> 20), static_cast<unsigned long long>(off >> 20));
+}
 
 bool ShaderCache::open(const std::string& dir) {
     std::lock_guard lk(lock_);
@@ -907,6 +1175,7 @@ bool ShaderCache::open(const std::string& dir) {
     dir_ = dir;
     open_ = true;
     NXLOG_I("nvn", "shader cache %s: %zu records", dir.c_str(), lines_.size());
+    pack_open();
     start_preload();
     return true;
 }
@@ -932,10 +1201,26 @@ void ShaderCache::start_preload() {
     if (pre_list_.empty() || threads == 0) return;
     NXLOG_I("nvn", "shader preload: %zu shaders from %s on %lld threads", pre_list_.size(), order_path_.c_str(),
             static_cast<long long>(threads));
+    pre_start_ms_ = now_ms();
+    pre_live_.store(static_cast<int>(threads));
+    if (pack_file_ && !pack_.empty()) pack_prefetch_thread_ = std::thread([this] { pack_prefetch(); });
+    if (pack_enabled()) {
+        size_t missing = 0;
+        for (const std::string& h : pre_list_)
+            if (!pack_.count(h)) missing++;
+        // A handful of new shaders is not worth rewriting a few hundred MB on the card: they are read from their files until more come.
+        if (missing >= 32 || (missing && missing * 50 >= pre_list_.size())) pack_build_thread_ = std::thread([this, missing] { pack_build(missing); });
+    }
     for (int64_t i = 0; i < threads; ++i) pre_threads_.emplace_back([this] { preload_worker(); });
 }
 
 void ShaderCache::preload_worker() {
+    struct LastOut {
+        ShaderCache* c;
+        ~LastOut() {
+            if (c->pre_live_.fetch_sub(1) == 1) c->preload_done();
+        }
+    } last_out{this};
     for (;;) {
         std::string hash;
         {
@@ -967,7 +1252,7 @@ std::unique_ptr<ShaderCache::Preloaded> ShaderCache::preload_one(const std::stri
         if (by_hash_.count(hash)) return nullptr;   // the game got there first
     }
     std::string bytes;
-    if (!read_file(dir_ + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) return nullptr;
+    if (!read_spv(hash, bytes) || bytes.empty() || bytes.size() % 4) return nullptr;
     auto p = std::make_unique<Preloaded>();
     p->words.resize(bytes.size() / 4);
     std::memcpy(p->words.data(), bytes.data(), bytes.size());
@@ -1028,8 +1313,12 @@ ShaderCache::~ShaderCache() {
         pre_stop_ = true;
     }
     pre_cv_.notify_all();
+    pack_stop_.store(true);
     for (std::thread& t : pre_threads_)
         if (t.joinable()) t.join();
+    if (pack_prefetch_thread_.joinable()) pack_prefetch_thread_.join();
+    if (pack_build_thread_.joinable()) pack_build_thread_.join();
+    if (pack_file_) CloseHandle(static_cast<HANDLE>(pack_file_));
     if (!order_pending_.empty() && !order_path_.empty()) {
         std::ofstream f(order_path_, std::ios::binary | std::ios::app);
         if (f) f << order_pending_;
@@ -1129,7 +1418,7 @@ const ShaderInfo* ShaderCache::load(const std::string& hash, const uint8_t* code
         words = std::move(pre->words);
     } else {
         std::string bytes;
-        if (!read_file(dir_ + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) {
+        if (!read_spv(hash, bytes) || bytes.empty() || bytes.size() % 4) {
             dump_missing_block(hash, code, control, code_size);
             return miss("no usable " + dir_ + "/" + hash + ".spv");
         }
@@ -1174,7 +1463,7 @@ const ShaderInfo* ShaderCache::load_stub(const std::string& hash) {
         dir = dir_;
     }
     std::string bytes;
-    if (!read_file(dir + "/" + hash + ".spv", bytes) || bytes.empty() || bytes.size() % 4) {
+    if (!read_spv(hash, bytes) || bytes.empty() || bytes.size() % 4) {
         if (!existing) {
             std::lock_guard lk(lock_);
             stubs_.emplace(hash, nullptr);

@@ -12,6 +12,7 @@
 // Everything above "the runtime cache" is plain C++ with no dependency on the rest of the runtime.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -305,6 +306,27 @@ private:
     void note_order_locked(const std::string& hash, std::string& flush);   // flush: lines to append, written by the caller after unlocking
     void flush_order(const std::string& lines);
     std::unique_ptr<Preloaded> take_preloaded(const std::string& hash);
+
+    // The preload pack (<dir>.preload.pack, nvn_shaders.cpp "the preload pack"): the order file's .spv files in one file, zstd-compressed,
+    // written by the runtime after a run's boot preload and read instead of the separate files by the runs after it.
+    struct PackEntry {
+        uint64_t offset;
+        uint32_t csize, usize;
+    };
+    void pack_open();                                                  // open(), lock_ held
+    bool pack_read(const std::string& hash, std::string& out);         // any thread, no lock
+    bool read_spv(const std::string& hash, std::string& out);          // the pack, else <dir>/<hash>.spv
+    void pack_prefetch();                                              // own thread
+    void preload_done();                                               // the last preload worker as it ends
+    void pack_build(size_t missing);                                   // own thread
+    void* pack_file_ = nullptr;                                        // HANDLE of preload.pack; set in open(), then read-only
+    uint64_t pack_data_end_ = 0;
+    std::unordered_map<std::string, PackEntry> pack_;                  // the usable entries; set in open(), then read-only
+    std::atomic<bool> pack_stop_{false};
+    std::thread pack_prefetch_thread_, pack_build_thread_;
+    std::atomic<int> pre_live_{0};                                     // preload workers still running
+    std::atomic<uint64_t> pre_from_pack_{0}, pre_from_files_{0};       // .spv reads served by the pack / by separate files
+    uint64_t pre_start_ms_ = 0;
 
     std::mutex pre_mu_;
     std::condition_variable pre_cv_;                                        // a worker finished a read / an entry was taken / stop
