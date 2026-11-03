@@ -574,7 +574,7 @@ constexpr uint32_t kSwkbdResultOk = 0;
 constexpr uint32_t kSwkbdResultCancel = 1;
 constexpr uint32_t kTextCheckSuccess = 0;                     // SwkbdTextCheckResult: Success 0, Failure 1, Confirm 2, Silent 3
 constexpr uint32_t kTextCheckConfirm = 2;
-// SoftwareKeyboardConfig (Ryujinx, sequential layout) field offsets.
+// Keyboard config storage field offsets. The text fields, the lengths and the password mode sit at the same offsets in every version.
 constexpr size_t kCfgOkText = 0x04;            // u16[9]
 constexpr size_t kCfgHeaderText = 0x24;        // u16[65]
 constexpr size_t kCfgSubText = 0xA6;           // u16[129]
@@ -582,11 +582,18 @@ constexpr size_t kCfgGuideText = 0x1A8;        // u16[257]
 constexpr size_t kCfgMaxTextLength = 0x3AC;
 constexpr size_t kCfgMinTextLength = 0x3B0;
 constexpr size_t kCfgPasswordMode = 0x3B4;
-constexpr size_t kCfgUseUtf8 = 0x3BD;
-constexpr size_t kCfgInitialOffset = 0x3C0;
-constexpr size_t kCfgInitialLength = 0x3C4;    // UTF-16 characters
-constexpr size_t kCfgUseTextCheck = 0x3D0;
 constexpr size_t kCfgCommonSize = 0x3D4;
+// The flags and the initial string moved. Older SDKs push the application's KeyboardConfig as is (Ryujinx SoftwareKeyboardConfig,
+// natural alignment). The 0x530-byte config (library version 0x140010, Pokopia 2.0.1a) is repacked by the shim: sdk
+// nn::swkbd::ShowKeyboard(String*, const ShowKeyboardArg&, Trigger) at 0x750054e700 copies use_utf8 (arg 0x3BD) to 0x3AA, the initial
+// string offset/length (arg 0x3C0/0x3C4) to 0x3BC/0x3C0 and use_text_check (arg 0x3D0) to 0x48D. Read with the old offsets, use_utf8
+// came from a byte of the initial string offset (always 0): the text went back as UTF-16 to a game reading UTF-8, "Josh" -> "J".
+struct SwkbdCfgLayout {
+    size_t use_utf8, initial_offset, initial_length /* UTF-16 characters */, use_text_check;
+};
+constexpr size_t kCfgPackedSize = 0x530;
+constexpr SwkbdCfgLayout kCfgLayoutOld{0x3BD, 0x3C0, 0x3C4, 0x3D0};
+constexpr SwkbdCfgLayout kCfgLayoutPacked{0x3AA, 0x3BC, 0x3C0, 0x48D};
 constexpr size_t kCommonArgsLibraryVersion = 8;               // CommonArguments: version, size, library_version, theme ...
 
 std::string utf16_to_utf8(const std::u16string& s) {
@@ -772,18 +779,19 @@ void swkbd_start(const std::shared_ptr<AppletState>& ap) {
     swkbdui::Request& r = a.req;
     r.title = profile().name;
     if (cfg && cfg->size() >= kCfgCommonSize) {
+        const SwkbdCfgLayout& l = cfg->size() == kCfgPackedSize ? kCfgLayoutPacked : kCfgLayoutOld;
         const uint32_t m = read_at<uint32_t>(*cfg, kCfgMaxTextLength, 0);
         if (m > 0 && m <= kSwkbdDefaultMaxLength) max_len = m;
         r.min_len = read_at<uint32_t>(*cfg, kCfgMinTextLength, 0);
         r.password = read_at<uint32_t>(*cfg, kCfgPasswordMode, 0) != 0;
-        a.utf8 = read_at<uint8_t>(*cfg, kCfgUseUtf8, 0) != 0;
-        a.text_check = read_at<uint8_t>(*cfg, kCfgUseTextCheck, 0) != 0;
+        a.utf8 = read_at<uint8_t>(*cfg, l.use_utf8, 0) != 0;
+        a.text_check = read_at<uint8_t>(*cfg, l.use_text_check, 0) != 0;
         r.ok_text = read_u16_text(*cfg, kCfgOkText, 9);
         r.header = read_u16_text(*cfg, kCfgHeaderText, 65);
         r.sub = read_u16_text(*cfg, kCfgSubText, 129);
         r.guide = read_u16_text(*cfg, kCfgGuideText, 257);
-        const int32_t ioff = read_at<int32_t>(*cfg, kCfgInitialOffset, 0);
-        const int32_t ilen = read_at<int32_t>(*cfg, kCfgInitialLength, 0);
+        const int32_t ioff = read_at<int32_t>(*cfg, l.initial_offset, 0);
+        const int32_t ilen = read_at<int32_t>(*cfg, l.initial_length, 0);
         if (work && ioff >= 0 && ilen > 0) r.initial = read_u16_text(*work, static_cast<size_t>(ioff), static_cast<size_t>(ilen));
     } else {
         NXLOG_W("am", "swkbd: no keyboard config among the %zu storages pushed: defaults used", a.in_data.size());

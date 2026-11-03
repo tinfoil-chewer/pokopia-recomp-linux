@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <windows.h>
 #include <cstring>
+#include <vector>
 
 #include "nxrt/config.h"
 #include "nxrt/kernel.h"
@@ -347,6 +348,47 @@ NXTEST(am_error_and_shop_applets_close) {
     CHECK_EQ(shop.call(10).result, 0u);
     CHECK_EQ(shop.call(1).get<uint8_t>(0), 1u);
     CHECK_EQ(shop.call(30).result, 0x2C80u);
+}
+
+namespace {
+// A new storage holding `bytes`, as a raw handle for PushInData's move (a Session would close it after the move).
+uint32_t make_storage(nxsvc::Session& creator, const std::vector<uint8_t>& bytes) {
+    // ponytail: leaked on purpose, the push moves the handle away
+    auto* st = new nxsvc::Session(creator.sub(creator.call(10, nxsvc::Args().i64(static_cast<int64_t>(bytes.size())))));
+    nxsvc::Session acc = st->sub(st->call(0));
+    acc.call(10, nxsvc::Args().i64(0).buf_a(bytes.data(), bytes.size()));
+    return st->handle();
+}
+}  // namespace
+
+// The 0x530-byte keyboard config of library version 0x140010 (Pokopia's name entry) keeps use_utf8 at 0x3AA, not at the 0x3BD of the
+// older layout: the answer must come back as UTF-8, or the game reads "Josh" as "J" (fork issue #6).
+NXTEST(am_swkbd_packed_config_utf8) {
+    nxsvc::Env env;
+    config_set("applet", "swkbd_text", "Josh");
+    nxsvc::Session proxy = open_proxy();
+    REQUIRE(proxy.valid());
+    nxsvc::Session creator = proxy.sub(proxy.call(11));
+    REQUIRE(creator.valid());
+    nxsvc::Session kb = creator.sub(creator.call(0, nxsvc::Args().u32(0x11).u32(0)));
+    REQUIRE(kb.valid());
+    std::vector<uint8_t> common(0x20, 0), cfg(0x530, 0);
+    const uint32_t version = 0x140010, max_len = 12;
+    std::memcpy(common.data() + 8, &version, 4);
+    std::memcpy(cfg.data() + 0x3AC, &max_len, 4);
+    cfg[0x3AA] = 1;                                   // use_utf8
+    CHECK_EQ(kb.call(100, nxsvc::Args().hmove(make_storage(creator, common))).result, 0u);
+    CHECK_EQ(kb.call(100, nxsvc::Args().hmove(make_storage(creator, cfg))).result, 0u);
+    CHECK_EQ(kb.call(10).result, 0u);
+    nxsvc::Reply out = kb.call(101);
+    REQUIRE(out.ok());
+    nxsvc::Session os = kb.sub(out);
+    nxsvc::Session acc = os.sub(os.call(0));
+    uint8_t buf[12] = {0xEE};
+    CHECK_EQ(acc.call(11, nxsvc::Args().i64(0).buf_b(buf, sizeof buf)).result, 0u);
+    const uint8_t want[12] = {0, 0, 0, 0, 'J', 'o', 's', 'h', 0, 0, 0, 0};   // SwkbdResult Ok, then UTF-8 with its NUL
+    CHECK(std::memcmp(buf, want, sizeof want) == 0);
+    clear_config();
 }
 
 NXTEST(am_desired_language) {
