@@ -80,7 +80,27 @@ int64_t now_ns() {
     return static_cast<int64_t>(t / 12 * 625 + t % 12 * 625 / 12);
 }
 
+// set_blocked_hook: the host thread that runs a hook while it is blocked in a kernel wait, and the hook.
+std::atomic<DWORD> g_blocked_tid{0};
+std::atomic<void (*)()> g_blocked_fn{nullptr};
+
 }  // namespace
+
+// One sleep on t's condition variable (g_k held, released while sleeping). On the thread set_blocked_hook names it sleeps 10 ms at most and,
+// when that runs out, calls the hook with g_k released. Every caller loops and re-checks its condition, so a wake that comes while the hook
+// runs is not lost.
+void sleep_locked(KThread& t, DWORD ms) {
+    void (*fn)() = g_blocked_fn.load(std::memory_order_acquire);
+    if (fn && GetCurrentThreadId() == g_blocked_tid.load(std::memory_order_relaxed)) {
+        if (!SleepConditionVariableSRW(thread_cv(t), &g_k, std::min<DWORD>(ms, 10), 0)) {
+            ReleaseSRWLockExclusive(&g_k);
+            fn();
+            AcquireSRWLockExclusive(&g_k);
+        }
+        return;
+    }
+    SleepConditionVariableSRW(thread_cv(t), &g_k, ms, 0);
+}
 
 // Waits (g_k held, released while sleeping) until t.wake or the timeout; false on timeout.
 bool block_on_wake(KThread& t, int64_t timeout_ns) {
@@ -93,7 +113,7 @@ bool block_on_wake(KThread& t, int64_t timeout_ns) {
             int64_t m = (rem + 999999) / 1000000;
             ms = static_cast<DWORD>(m > 0x7FFFFFFE ? 0x7FFFFFFE : m);
         }
-        SleepConditionVariableSRW(thread_cv(t), &g_k, ms, 0);
+        sleep_locked(t, ms);
     }
     return true;
 }
@@ -329,8 +349,20 @@ uint32_t wait_synchronization(const uint32_t* handles, int32_t count, int64_t ti
             int64_t m = (rem + 999999) / 1000000;
             ms = static_cast<DWORD>(m > 0x7FFFFFFE ? 0x7FFFFFFE : m);
         }
-        SleepConditionVariableSRW(thread_cv(me), &g_k, ms, 0);
+        sleep_locked(me, ms);
     }
+}
+
+namespace detail {
+void (*blocked_hook_here())() {
+    void (*fn)() = g_blocked_fn.load(std::memory_order_acquire);
+    return fn && GetCurrentThreadId() == g_blocked_tid.load(std::memory_order_relaxed) ? fn : nullptr;
+}
+}  // namespace detail
+
+void set_blocked_hook(uint32_t host_tid, void (*fn)()) {
+    g_blocked_tid.store(host_tid, std::memory_order_relaxed);
+    g_blocked_fn.store(fn, std::memory_order_release);
 }
 
 uint32_t cancel_synchronization(uint32_t thread_handle) {

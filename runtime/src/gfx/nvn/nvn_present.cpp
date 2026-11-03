@@ -59,7 +59,7 @@ bool shot_wanted(int64_t n) {
 }
 }  // namespace
 
-void present_on_render_thread(Window* w, int index) {
+void present_on_render_thread(Window* w, int index, bool again) {
     NXFT("present");
     nxrt::HitchTimer ht_present(nxrt::kHpRenderPresent);
     CaptureEnd capture_end;
@@ -68,8 +68,9 @@ void present_on_render_thread(Window* w, int index) {
     if (!w || index < 0 || static_cast<size_t>(index) >= w->textures.size()) return;
     Texture* t = w->textures[index].get();
     if (!t) return;
-    counters().presents.fetch_add(1, std::memory_order_relaxed);
-    { NXFT("present.frame_tick"); diag_frame_tick(); }   // the freeze watchdog counts presented frames (and the test runner its frames)
+    if (!again) counters().presents.fetch_add(1, std::memory_order_relaxed);
+    // the freeze watchdog counts presented frames (and the test runner its frames); a frame shown again while the game waits on the player counts too
+    { NXFT("present.frame_tick"); diag_frame_tick(); }
     if (!rend || !pp) return;
     { NXFT("present.tex"); if (!tex_gpu(t)) return; }
     extras::pace_note_present();
@@ -78,7 +79,7 @@ void present_on_render_thread(Window* w, int index) {
         { NXFT("present.hook"); lim->run_pre_frame_hook(); }
         if (!(extras::pace_in_main() && extras::pace_boundary_consume())) { NXFT("limiter"); nxrt::HitchTimer ht(nxrt::kHpRenderLimiter); lim->begin_frame_nohook(); }
     }
-    {
+    if (!again) {
         const int64_t n = static_cast<int64_t>(counters().presents.load());
         {
             static int last_ph = -1, cycle_n = 0, shot_key = -1;

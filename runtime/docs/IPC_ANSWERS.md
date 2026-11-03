@@ -34,7 +34,7 @@ line. "Cancelled" = Start ends the applet at once and GetResult answers 128-22 (
 
 | Applet id | Game reaches it through (main import) | Answer | What the game then does |
 |---|---|---|---|
-| 0x1020011 swkbd | `nn::swkbd::ShowKeyboard` (main 0x7101141f00, 0x7101142190) | the PC prompt's text or `[applet] swkbd_text`; text check round trip | takes the name |
+| 0x1020011 swkbd | `nn::swkbd::ShowKeyboard` (main 0x7101141f00, 0x7101142190) | the on-screen keyboard's text or `[applet] swkbd_text`; text check round trip | takes the name |
 | 0x100000E error | `nn::err::ShowError(Result)`, `ShowApplicationError`; also `ldn::Connect`, `pctl::TryBeginFreeCommunication`, GameShare failures via ShowError | logged (code, messages), ends with success, no UI | ShowError ignores the result |
 | 0x1000010 player select, mode 0 | not imported directly (kept for completeness) | the one user, result 0 | — |
 | 0x1000010 player select, mode 2 / 10 / 11 | `nn::account::EnsureNetworkServiceAccountAvailable` (12 call sites, e.g. main 0x7100542f20, 0x7100583860), `ShowLicenseRequirementsForNetworkService` (0x7100543098), `err::ShowError` for some network results | output result 0x27C (124-1 CancelledByUser), no user | the callers check 0x27C and stop quietly. Was result 0 before: mode 2 then made them retry the NSA token request in a loop, since acc keeps answering 124-200 |

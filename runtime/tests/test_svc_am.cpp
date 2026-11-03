@@ -4,7 +4,11 @@
 // Ryujinx for the result codes (module 128: result = module | description << 9), not read from the service.
 #include <filesystem>
 #include <windows.h>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -432,6 +436,56 @@ NXTEST(am_swkbd_text_check_utf8) {
     const uint8_t want[12] = {0, 0, 0, 0, 'J', 'o', 's', 'h', 0, 0, 0, 0};   // SwkbdResult Ok, then UTF-8
     CHECK(std::memcmp(buf, want, sizeof want) == 0);
     clear_config();
+}
+
+// The on-screen keyboard's handoff (swkbd_prompt.cpp): ask() waits on its own thread, pending() shows the open question to the keyboard,
+// answer() with that id returns the text; a stale id changes nothing; a cancel returns false and leaves the text alone.
+NXTEST(swkbdui_ask_answer) {
+    namespace sk = services::swkbdui;
+    CHECK(sk::pending(nullptr) == 0);
+    auto wait_open = [] {
+        uint64_t id = 0;
+        for (int i = 0; i < 5000 && !(id = sk::pending(nullptr)); ++i) Sleep(1);
+        return id;
+    };
+    sk::Request req;
+    req.header = "Your name?";
+    req.initial = "Jo";
+    req.max_len = 10;
+    std::string got;
+    std::atomic<bool> done{false};
+    bool ok = false;
+    std::thread t([&] { ok = sk::ask(req, &got); done = true; });
+    const uint64_t id = wait_open();
+    CHECK(id != 0);
+    if (!id) { t.detach(); return; }
+    sk::Request seen;
+    CHECK(sk::pending(&seen) == id);
+    CHECK(seen.header == "Your name?");
+    CHECK(seen.initial == "Jo");
+    CHECK(seen.max_len == 10u);
+    sk::answer(id + 1, true, "wrong");               // not the open question: ignored
+    Sleep(30);
+    CHECK(!done.load());
+    CHECK(sk::pending(nullptr) == id);
+    sk::answer(id, true, "Josh");
+    t.join();
+    CHECK(ok);
+    CHECK(got == "Josh");
+    CHECK(sk::pending(nullptr) == 0);
+
+    std::string got2 = "unchanged";
+    bool ok2 = true;
+    std::thread t2([&] { ok2 = sk::ask(req, &got2); });
+    const uint64_t id2 = wait_open();
+    CHECK(id2 > id);
+    if (!id2) { t2.detach(); return; }
+    sk::answer(id2, false, "ignored");
+    t2.join();
+    CHECK(!ok2);
+    CHECK(got2 == "unchanged");
+    sk::answer(id2, true, "late");                   // already answered: no effect
+    CHECK(sk::pending(nullptr) == 0);
 }
 
 NXTEST(am_desired_language) {

@@ -68,8 +68,10 @@ namespace {
 // thread that owns the window it pumps the events when the last pump is 100 ms old. Elsewhere it costs a thread-id compare.
 std::atomic<DWORD> g_pump_tid{0};
 std::atomic<uint64_t> g_last_pump_ms{0};
+void keyboard_service();
 void busy_pump() {
     if (GetCurrentThreadId() != g_pump_tid.load(std::memory_order_relaxed)) return;
+    keyboard_service();
     const uint64_t t = SDL_GetTicks();
     if (t - g_last_pump_ms.load(std::memory_order_relaxed) < 100) return;
     g_last_pump_ms.store(t, std::memory_order_relaxed);
@@ -335,11 +337,14 @@ void pre_frame(void*) {
 
 bool key_sink(const char* name, bool down) {
     InputId id;
+    static float s_mx = 0, s_my = 0;     // the last scripted pointer position: a scripted click lands there, as a real one would
     // Scripted pointer: `keydown mpos <x> <y>` puts the pointer at window pixel (x, y) the way a real motion event does (S28 tests).
     if (name && std::strncmp(name, "mpos ", 5) == 0) {
         if (!down) return true;
         float px = 0, py = 0;
         if (std::sscanf(name + 5, "%f %f", &px, &py) != 2) return false;
+        s_mx = px;
+        s_my = py;
         input::Event m;
         m.type = input::EventType::MouseMotion;
         m.u.motion.x = px;
@@ -362,6 +367,8 @@ bool key_sink(const char* name, bool down) {
             e.type = down ? input::EventType::MouseButtonDown : input::EventType::MouseButtonUp;
             e.u.button.button = static_cast<uint8_t>(id.code);
             e.u.button.clicks = 1;
+            e.u.button.x = s_mx;
+            e.u.button.y = s_my;
             break;
         case InKind::Wheel:
             if (!down) return true;      // a notch has no release
@@ -512,7 +519,7 @@ void handle_event(const input::Event& e, uint64_t now) {
         return;
     }
     if (st.overlay && st.overlay->handle_event(e)) return;
-    const bool menu_blocked = st.overlay && st.overlay->visible();
+    const bool menu_blocked = st.overlay && st.overlay->blocks_game();
     if ((e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) || e.type == EventType::MouseButtonDown || e.type == EventType::MouseWheel)
         st.last_dev = LastDevice::KeyboardMouse;
     switch (e.type) {
@@ -650,8 +657,15 @@ void poll_pads(uint64_t now) {
         st.rumble_hi = hi;
         st.last_rumble_ns = now;
     }
-    // The settings menu is open: the pad does not reach the game (the keyboard and mouse are held back the same way in handle_event).
-    if (st.overlay && st.overlay->visible()) {
+    // The on-screen keyboard reads the merged pad before it is held back; what it returns stays away from the game (everything while it is
+    // open, then the button that closed it until it is released).
+    if (st.overlay) {
+        st.overlay->set_keyboard_abxy(st.settings.pad.label_abxy);
+        pf.buttons &= ~st.overlay->set_keyboard_pad(pf.buttons, pf.left.x, pf.left.y);
+    }
+    // The settings menu or the on-screen keyboard is open: the pad does not reach the game (the keyboard and mouse are held back the same way in
+    // handle_event).
+    if (st.overlay && st.overlay->blocks_game()) {
         pf.buttons = 0;
         pf.left = hid::StickValue{};
         pf.right = hid::StickValue{};
@@ -659,9 +673,16 @@ void poll_pads(uint64_t now) {
     st.source_owner->set_pad(pf);
 }
 
+// set while update_hook runs: keyboard_service stays out of it
+thread_local bool t_in_update = false;
+
 int update_hook(::Ctx*, uint64_t, void*) {
     G& st = g();
     ft::mark("main.update");
+    struct InUpdate {
+        InUpdate() { t_in_update = true; }
+        ~InUpdate() { t_in_update = false; }
+    } in_update;
     // frame pacing (S18): the limiter waits here, before the input is sampled, so the picture shown is the one simulated one render time
     // earlier. The wait for frames still in flight comes first, then the limiter's schedule.
     // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (Pokopia ~79 against ~50 a
@@ -792,11 +813,12 @@ int update_hook(::Ctx*, uint64_t, void*) {
         prompts_update(st.settings, pin);
     }
 
-    const bool overlay_visible = st.overlay && st.overlay->visible();
+    const bool overlay_visible = st.overlay && st.overlay->blocks_game();
     if (overlay_visible && !st.overlay_was_visible) st.engine->release_all(now);
     st.overlay_was_visible = overlay_visible;
 
     if (st.window) {
+        platform::set_text_input(st.overlay && st.overlay->keyboard_open());   // typed text for the on-screen keyboard only
         const bool want = st.capture_mouse && platform::focused() && !platform::minimized() && !overlay_visible && playing &&
                           st.capture_state.load() == 0 && !hid::jc2_mouse_wants_pointer();
         if (want != platform::relative_mouse()) {
@@ -880,6 +902,37 @@ int update_hook(::Ctx*, uint64_t, void*) {
     }
     if (st.selftest.active()) st.selftest.tick(st.renderer, &st.limiter, selftest_host());
     return 0;
+}
+
+// The software keyboard applet blocks the game: the thread that asked waits for the answer, the main thread soon waits too, and no frame is
+// presented (Pokopia's name entry: the freeze watchdog fired 10 s after the question, frame count still). update_hook, which pumps the window
+// and feeds the overlay, does not run then. keyboard_service does that part on the window's thread while it is blocked in the kernel
+// (kernel::set_blocked_hook) or about to make an SVC (busy_pump), every 8 ms at most: the window's events and the pads go to the overlay's
+// on-screen keyboard, the mouse is free, typing is on, and the game's last frame is presented again so the keyboard is drawn. Nothing
+// happens while no question is open, or from inside update_hook.
+void keyboard_service() {
+    static thread_local uint64_t last_ms = 0;
+    const uint64_t t = SDL_GetTicks();
+    if (t - last_ms < 8 || t_in_update) return;
+    last_ms = t;
+    G& st = g();
+    if (!st.started || !st.overlay || !st.overlay->keyboard_open()) return;
+    const uint64_t now = now_ns();
+    platform::pump_events();          // also headless (scripted runs): SDL's virtual pads update here
+    if (st.window) {
+        g_last_pump_ms.store(t, std::memory_order_relaxed);
+        platform::set_text_input(true);
+        if (platform::relative_mouse()) platform::set_relative_mouse(false);
+        platform::set_cursor_visible(true);
+    }
+    input::Event buf[64];
+    for (;;) {
+        const size_t got = input::queue_drain(buf, 64);
+        if (!got) break;
+        for (size_t i = 0; i < got; ++i) handle_event(buf[i], now);
+    }
+    poll_pads(now);
+    nvn::present_last_frame_again();
 }
 
 // ---- what the game module gets from play mode (play_game.h GameHost) ----------------------------------------------------------------------
@@ -1167,7 +1220,6 @@ bool start(const StartOptions& opt) {
     kernel::sched_set_process_priority(st.window);     // a person is playing: keep the frame out of the background load
     st.pump_thread = std::this_thread::get_id();
     g_pump_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
-    if (st.window) svc_set_busy_hook(&busy_pump);       // the window keeps answering while the game boots or loads (no frame boundary for seconds)
     st.engine = std::make_unique<Engine>(st.settings);
     st.engine->set_context(Ctx::Menu, now_ns());
     st.source_owner = std::make_unique<PlaySource>(st.engine.get());
@@ -1187,12 +1239,12 @@ bool start(const StartOptions& opt) {
         NXLOG_I(kTag, "selftest script: %s", script.c_str());
     }
 
-    // The software keyboard asks the player in a small native window while there is a game window ([applet] swkbd_prompt = false: never).
-    services::swkbdui::enable_prompt(st.window && config_get_bool("applet", "swkbd_prompt", true));
     if (st.renderer) {
         st.limiter.set_pre_frame_hook(&pre_frame, nullptr);
         if (!st.renderer->headless()) st.renderer->set_present_mode(present_mode_for(st.settings.display));
-        if (opt.overlay && opt.device) {
+        // [applet] swkbd_prompt = force makes the overlay for the on-screen keyboard even where the host asked for none (headless test runs)
+        const bool swkbd_force = config_get_str("applet", "swkbd_prompt", "true") == "force";
+        if ((opt.overlay || swkbd_force) && opt.device) {
             gfx::Overlay::Context oc;
             oc.device = opt.device;
             oc.renderer = opt.renderer;
@@ -1209,6 +1261,16 @@ bool start(const StartOptions& opt) {
             }
         }
     }
+    // The software keyboard asks the player on the overlay's on-screen keyboard while there is a game window ([applet] swkbd_prompt = false: never;
+    // force: also without a window, for scripted headless runs).
+    {
+        const bool force = config_get_str("applet", "swkbd_prompt", "true") == "force";
+        services::swkbdui::enable_prompt(st.overlay && (force || (st.window && config_get_bool("applet", "swkbd_prompt", true))));
+    }
+    // the window keeps answering while the game boots or loads (no frame boundary for seconds), and the on-screen keyboard works while the
+    // game waits for it (keyboard_service; also headless with swkbd_prompt = force, which has an overlay and no window)
+    if (st.window || st.overlay) svc_set_busy_hook(&busy_pump);
+    kernel::set_blocked_hook(GetCurrentThreadId(), &keyboard_service);
     if (st.window && st.settings.display.monitor > 0) platform::move_to_display(st.settings.display.monitor);
     if (st.window && st.settings.display.window_mode != "windowed") set_window_mode(st.settings.display.window_mode);
 
@@ -1235,6 +1297,7 @@ void stop() {
     if (!st.started) return;
     vpad_shutdown();      // a virtual pad from a test script does not outlive play mode
     if (const GamePlay* gp = game_play(); gp && gp->remove) gp->remove();
+    kernel::set_blocked_hook(0, nullptr);
     if (st.hook_update) hook_remove(st.hook_update);
     st.hook_update = 0;
     hid::set_vibration_sink(nullptr, nullptr);

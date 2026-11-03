@@ -325,6 +325,7 @@ bool keep_aspect();
 void trace_dump_targets();
 
 // ---- present -----------------------------------------------------------------------------------------------------------
-void present_on_render_thread(Window* w, int index);
+void present_on_render_thread(Window* w, int index, bool again = false);   // again: present_again (not counted as a game present)
+void present_again();
 
 }  // namespace nxrt::nvn::be::gpu

@@ -83,6 +83,10 @@ struct Gpu {
     std::mutex pmu;
     std::condition_variable pcv;
     int presents_pending = 0;
+    // The game's last present (under pmu): present_again shows it once more while the game presents nothing (it waits for a library applet).
+    Ref<Window> last_window;
+    int last_index = -1;
+    std::chrono::steady_clock::time_point last_present{};
     Slot slots[kSlots];
     VkQueryPool qpool = VK_NULL_HANDLE;   // frame trace: two timestamps per slot
     VkQueryPool gpool = VK_NULL_HANDLE;   // GPU pass profiler ([prof] gpu_passes): kGpMax timestamps per slot
@@ -758,6 +762,12 @@ void present(Window* window, int index) {
     NXFT("present.call");
     nxrt::hitch_note_game_present();
     {
+        std::lock_guard<std::mutex> lk(g->pmu);
+        g->last_window = Ref<Window>::share(window);
+        g->last_index = index;
+        g->last_present = std::chrono::steady_clock::now();
+    }
+    {
         const uint64_t n = g_frame_count.load(std::memory_order_relaxed);
         g_frame_work[n & 3].store(g->reserved.load(), std::memory_order_relaxed);
         g_frame_count.store(n + 1, std::memory_order_release);
@@ -780,6 +790,33 @@ void present(Window* window, int index) {
         std::lock_guard<std::mutex> lk(g->qmu);
         g->queue.push_back([keep, index] {
             present_on_render_thread(keep.get(), index);
+            std::lock_guard<std::mutex> l2(g->pmu);
+            --g->presents_pending;
+            g->pcv.notify_all();
+        });
+        g_gauge_render_queue.add(1);
+    }
+    g->qcv.notify_one();
+}
+
+// The game's last frame once more, queued like a present (the overlay is drawn on top as on every frame). Only when the game has not
+// presented for 50 ms and nothing is queued, so it never competes with the game's own frames.
+void present_again() {
+    if (!g) return;
+    Ref<Window> keep;
+    int index = -1;
+    {
+        std::lock_guard<std::mutex> lk(g->pmu);
+        if (!g->last_window || g->presents_pending > 0) return;
+        if (std::chrono::steady_clock::now() - g->last_present < std::chrono::milliseconds(50)) return;
+        keep = g->last_window;
+        index = g->last_index;
+        ++g->presents_pending;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g->qmu);
+        g->queue.push_back([keep, index] {
+            present_on_render_thread(keep.get(), index, true);
             std::lock_guard<std::mutex> l2(g->pmu);
             --g->presents_pending;
             g->pcv.notify_all();
@@ -956,6 +993,10 @@ void tear_down() {
     for (const char* n : kCounterGauges) nxrt::gauge_unregister(n);
     Gpu* gp = g;
     run_on_render_thread([&] {
+        {
+            std::lock_guard<std::mutex> l2(gp->pmu);
+            gp->last_window = nullptr;
+        }
         wait_serial_blocking(gp->submitted);
         retire();
         replay_shutdown();
@@ -1024,6 +1065,9 @@ bool install_backend(const BackendDesc& desc) {
 }
 
 void shutdown_backend() { be::gpu::tear_down(); }
+void present_last_frame_again() {
+    if (be::gpu::active()) be::gpu::present_again();
+}
 
 bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r) {
     ShaderPrepareResult local;

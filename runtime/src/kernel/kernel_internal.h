@@ -16,5 +16,7 @@ extern SRWLOCK g_k;                      // the "kernel lock": wait queues and w
 // Blocks the calling thread on its own condition variable with g_k held until t.wake or the deadline (ns, < 0 = forever).
 bool block_on_wake(KThread& t, int64_t timeout_ns);
 void wake_thread(KThread& t, uint32_t result = 0);   // g_k held
+// The set_blocked_hook function when the calling thread is the one it names, else null (kernel_sync.cpp).
+void (*blocked_hook_here())();
 
 }  // namespace nxrt::kernel::detail

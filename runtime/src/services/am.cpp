@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // appletOE and appletAE (S3c): the applet manager as the one application sees it. The application is in focus, its message
 // queue holds what the console queues for it, the notification flags it sets are real state. Library applets: the software keyboard
-// answers a text (a prompt on the PC, or a configured text); the player select answers the one user; the others end at once.
+// answers a text (the overlay's on-screen keyboard, or a configured text); the player select answers the one user; the others end at once.
 // Command ids and layouts follow the Switchbrew "Applet Manager services" page and ScarletNX's am.swipc.
 // Adapted from ScarletNX src/nx/hle/services/am.c and am.swipc (GPL-3.0-or-later): the command table, the message queue, the lock
 // accessor, the audio volumes, the save data rules and the launch parameter storage.
@@ -763,12 +763,12 @@ void swkbd_answer(AppletState& a, bool ok) {
     a.interactive_out_event.signal();
 }
 
-// Asks the PC prompt on its own thread; the answer arrives with mu() taken there.
+// Asks the on-screen keyboard on its own thread; the answer arrives with mu() taken there.
 void swkbd_prompt_async(const std::shared_ptr<AppletState>& ap) {
     swkbdui::Request r = ap->req;
     std::thread([ap, r] {
         std::string t;
-        const bool ok = swkbdui::win32_prompt(r, &t);
+        const bool ok = swkbdui::ask(r, &t);
         std::u16string u = utf8_to_utf16(t);
         std::lock_guard<std::mutex> lk(mu());
         if (ok) {

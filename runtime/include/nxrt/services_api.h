@@ -28,9 +28,9 @@ bool in_focus();
 }  // namespace amctl
 
 // ---- the software keyboard library applet (am.cpp, swkbd_prompt.cpp) ---------------------------------------------------------------
-// Where the keyboard's text comes from, in order: [applet] swkbd_text when set (test runs: NXRT_APPLET_SWKBD_TEXT); else the PC prompt when
-// enabled (a native window, see swkbd_prompt.cpp; the play layer enables it when there is a game window); else the initial text the game
-// gave; else "Player".
+// Where the keyboard's text comes from, in order: [applet] swkbd_text when set (test runs: NXRT_APPLET_SWKBD_TEXT); else the on-screen
+// keyboard when enabled (drawn by the overlay inside the game window; the play layer enables it when there is an overlay); else the initial
+// text the game gave; else "Player".
 namespace swkbdui {
 struct Request {
     std::string title;        // the window title (the game's name)
@@ -41,8 +41,11 @@ struct Request {
 };
 void enable_prompt(bool on);
 bool prompt_enabled();
-// Shows the prompt and waits for the player (the calling thread runs the window). True with *text set on OK, false on cancel.
-bool win32_prompt(const Request& r, std::string* text);
+// Posts the question and waits until the keyboard answers it. True with *text set on OK, false on cancel. Any thread but the one drawing.
+bool ask(const Request& r, std::string* text);
+// For the keyboard: the open question's id (0 = none), with *r set when there is one; answer() closes it (a stale id is ignored).
+uint64_t pending(Request* r);
+void answer(uint64_t id, bool ok, const std::string& text);
 }  // namespace swkbdui
 
 // ---- vi (vi_nv.cpp)----------------------------------------------------------------------------------------------------------------

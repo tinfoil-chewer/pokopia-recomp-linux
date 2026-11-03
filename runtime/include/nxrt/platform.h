@@ -53,6 +53,9 @@ bool move_to_display(int number);
 bool set_relative_mouse(bool on);
 bool relative_mouse();
 void set_cursor_visible(bool on);             // the OS cursor over the window (not in relative mode, which hides it); no-op without a window
+// SDL text input on the window (input::EventType::Text events, the IME): off unless something takes typing (the overlay's on-screen
+// keyboard). Main thread; cheap when nothing changes.
+void set_text_input(bool on);
 bool relative_mouse_is_raw();                 // true when the system-scale hint is off (the unaccelerated setup)
 
 // Polled gamepad state (play mode): what SDL's gamepad layer reports for one open pad. SDL normalises every controller to the Xbox

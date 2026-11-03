@@ -545,6 +545,11 @@ void set_cursor_visible(bool on) {
     else SDL_HideCursor();
 }
 
+void set_text_input(bool on) {
+    if (!g_window || SDL_TextInputActive(g_window) == on) return;
+    if (!(on ? SDL_StartTextInput(g_window) : SDL_StopTextInput(g_window))) NXLOG_W(kTag, "set_text_input(%d) failed: %s", on ? 1 : 0, SDL_GetError());
+}
+
 bool relative_mouse_is_raw() {
     const char* v = SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE);
     return v == nullptr || std::strcmp(v, "0") == 0;

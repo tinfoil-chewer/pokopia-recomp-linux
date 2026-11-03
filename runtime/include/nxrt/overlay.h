@@ -43,6 +43,18 @@ public:
     void toggle();
     int toggle_scancode() const;             // SDL scancode of the toggle key
     void set_toggle_scancode(int sc);
+    // The on-screen keyboard (the software keyboard applet's question, services_api.h swkbdui): drawn over the game whenever a question is
+    // open, menu or not (the menu is not drawn meanwhile). While it is up it takes the keyboard, the mouse and the pad (handle_event returns
+    // true for them). Physical keys type into it (needs SDL text input: platform::set_text_input), Enter answers, Escape cancels; the mouse
+    // clicks its keys; the pad walks the key grid (d-pad or left stick, with repeat): A types the key, B deletes, Y space, X shift, L/R
+    // move the caret, + answers, - cancels. Nothing here depends on the menu being visible.
+    bool keyboard_open() const;
+    bool blocks_game() const;                // the menu is visible or the on-screen keyboard is open: the game gets no input
+    void set_keyboard_abxy(bool by_label);   // how the face buttons are named in the keyboard's help line (play settings label_abxy)
+    // The merged pad of this poll (Switch buttons after the player's mapping, left stick -32767..32767, up = +), before it is held back
+    // from the game. Returns the buttons the game must not see: all while the keyboard is open, then those still held from the press
+    // that closed it until they are released. Call it on every pad poll.
+    uint64_t set_keyboard_pad(uint64_t buttons, int lx, int ly);
     bool wants_input() const;                // visible and ImGui wants the mouse or keyboard
     bool wants_mouse() const;                // visible and the pointer is over the menu or a widget is being dragged
     bool wants_keyboard() const;             // visible and a text field or navigation has the keyboard
