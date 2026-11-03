@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "prompt_resolve.h"
+#include "nxrt/host_device.h"
 
 #include <cctype>
 #include <vector>
@@ -175,6 +176,10 @@ PromptStyle auto_style(LastDevice last, int last_pad_kind, int connected_pad_kin
             default: return PromptStyle::Xbox;     // Xbox pads and every pad that is neither a PlayStation nor a Switch pad
         }
     };
+    // A Steam Deck is played with its controls: its trackpads and on-screen keyboard reach the game as mouse and keyboard input, which
+    // would switch the prompts to keyboard keys ("Enter" for A). There the built-in pad (Xbox layout) decides; [prompts] style keyboard
+    // still shows keys.
+    if (host_is_steam_deck()) return last == LastDevice::Pad ? from_kind(last_pad_kind) : connected_pad_kind >= 0 ? from_kind(connected_pad_kind) : PromptStyle::Xbox;
     switch (last) {
         case LastDevice::KeyboardMouse: return PromptStyle::Keyboard;
         case LastDevice::Pad: return from_kind(last_pad_kind);

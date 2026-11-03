@@ -66,6 +66,7 @@
 #include "nxrt/extras.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/hooks.h"
+#include "nxrt/host_device.h"
 #include "nxrt/jc2_mouse.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
@@ -525,13 +526,14 @@ int hook_cam_stick(::Ctx* c, uint64_t, void*) {
 }
 
 // The 16:9 internal size: the base rule (play_display.h internal_size), kept at 16:9 (the game's cameras and UI are authored for it) and,
-// unless a smaller size was asked for explicitly, at least the console's 1920x1080.
+// unless a smaller size was asked for explicitly, at least the console's 1920x1080. On a Steam Deck (nxrt/host_device.h) auto is the
+// window's size (1280x720 in Game Mode): its GPU held ~40-50 fps in the world at 1920x1080 and its screen shows 1280 wide anyway.
 void pick_size(const play::DisplaySettings& d, int window_w, int window_h, int* out_w, int* out_h) {
     int w = kTableW, h = kTableH;
     play::internal_size(d, window_w, window_h, &w, &h);
     const bool fixed = d.render_width > 0 && d.render_height > 0;
     h = std::min(h, static_cast<int>(static_cast<int64_t>(w) * 9 / 16));
-    if (!fixed && (d.render_scale <= 0 || d.render_scale >= 100)) h = std::max(h, kTableH);
+    if (!fixed && ((d.render_scale <= 0 && !host_is_steam_deck()) || d.render_scale >= 100)) h = std::max(h, kTableH);
     h = std::clamp(h / 18 * 18, 360, 4320);                          // 16:9 in whole pixels
     *out_w = h * 16 / 9;
     *out_h = h;
@@ -594,7 +596,10 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
         }
         float scale = 1.0f;
         if (fixed_size) scale = static_cast<float>(d.render_height) / gh;
-        else if (d.render_scale <= 0) scale = std::max(1.0f, std::min(static_cast<float>(window_h) / gh, static_cast<float>(window_w) / gw));
+        else if (d.render_scale <= 0) {
+            scale = std::min(static_cast<float>(window_h) / gh, static_cast<float>(window_w) / gw);
+            if (!host_is_steam_deck()) scale = std::max(1.0f, scale);   // see pick_size
+        }
         else scale = static_cast<float>(std::clamp(d.render_scale, 25, 400)) / 100.0f;
         gfx::tuning().render_scale.store(scale);
         NXLOG_I(kTag, "aspect %.4f (%s, window %dx%d): %dx%d game targets at scale %.3f, 3D view %s, UI kept 16:9 and centred, dynamic resolution %s",
@@ -612,7 +617,7 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
         // by the window's height (at least 1), a percentage of the console's 1920x1080
         float scale = 1.0f;
         if (d.render_width > 0 && d.render_height > 0) scale = static_cast<float>(d.render_height) / kTableH;
-        else if (d.render_scale <= 0) scale = std::max(1.0f, static_cast<float>(window_h) / kTableH);
+        else if (d.render_scale <= 0) scale = host_is_steam_deck() ? static_cast<float>(window_h) / kTableH : std::max(1.0f, static_cast<float>(window_h) / kTableH);
         else scale = static_cast<float>(std::clamp(d.render_scale, 25, 400)) / 100.0f;
         gfx::tuning().render_scale.store(scale);
         NXLOG_I(kTag, "aspect 16:9 (%s, window %dx%d): letterboxed on other window shapes", d.aspect > 0 ? "[display] aspect" : "auto", window_w, window_h);
@@ -633,8 +638,9 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
     s.hooks.push_back(hook_add_mid(base + kReplayViewports, &hook_replay_viewports));
     s.hooks.push_back(hook_add_mid(base + kLowCopy, &hook_low_copy));
     s.render_installed = true;
-    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %d%%%s), dynamic resolution %s", w, h, window_w, window_h, d.render_scale,
-            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "", d.dynamic_resolution ? "on" : "off");
+    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %d%%%s%s), dynamic resolution %s", w, h, window_w, window_h, d.render_scale,
+            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "", d.render_scale <= 0 && host_is_steam_deck() ? ", Steam Deck: the window's size" : "",
+            d.dynamic_resolution ? "on" : "off");
 }
 
 void play_install(uint64_t base, play::GameHost* host, const play::Settings& set) {
