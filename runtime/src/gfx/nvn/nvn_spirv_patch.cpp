@@ -856,7 +856,9 @@ bool spirv_init_outputs(const std::vector<uint32_t>& in, std::vector<uint32_t>& 
         if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
         if (n.at == insert_at) out.insert(out.end(), stores.begin(), stores.end());
         out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
-        // a geometry shader's outputs are undefined again after every emitted vertex
+        // a geometry shader's outputs are undefined again after every emitted vertex (Vulkan). Maxwell keeps them instead, so a shader that
+        // wrote an output once and emitted it twice would read (0,0,0,1) the second time; every GS this game ships rewrites each output
+        // before each emit, or returns right after its only one. A shader that relies on it needs Private shadow copies flushed at each emit.
         if (model == ModelGeometry && (n.op == OpEmitVertexOp || n.op == OpEmitStreamVertexOp)) out.insert(out.end(), stores.begin(), stores.end());
     }
     out[3] = bound;
