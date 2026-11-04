@@ -7,7 +7,9 @@ Windows. The game is still the Windows program the upstream project builds; this
 
 - **AMD GPUs and the Steam Deck.** Upstream gives the GPU the game's memory directly (`VK_EXT_external_memory_host`). The
   Linux AMD driver refuses that for memory Wine hands out, so on AMD the picture stayed black. This fork's runtime keeps a
-  copy for the GPU in step with the game instead, and fixes the depth format AMD lacks (white fog over the ground).
+  copy for the GPU in step with the game instead, and fixes the depth format AMD lacks (white fog over the ground). Vertex
+  shader outputs start at (0,0,0,1) as on the console: the Linux AMD driver left the game's unwritten components as NaN, which
+  turned the clouds and sky black (fix from [featureJosh's fork](https://github.com/featureJosh/pokopia-recomp)).
 - **Steam Deck defaults.** It is detected automatically: renders at 720p (60 fps at the title screen, 40-60 in the world) and
   shows controller button prompts.
 - **Faster loading from slow storage.** The shaders the game needs at boot are packed into one compressed file, written by
@@ -46,14 +48,15 @@ upstream.
 
 ## Credits
 
-The upstream project by drakolordx7, built on [nxrecomp](https://github.com/drakolordx7/nxrecomp). Uses code from
+The upstream project by drakolordx7, built on [nxrecomp](https://github.com/drakolordx7/nxrecomp). Fixes from featureJosh's fork
+(vertex output start values, the Switch 2 keyboard config and name check) keep their authors in the git history. Uses code from
 [Ryujinx](https://github.com/Ryubing/Ryujinx), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), smo-recomp, ScarletNX,
 ssbu-recomp, SuperMarioWonderRecomp, yuzu, Eden, libnx, [astc-encoder](https://github.com/ARM-software/astc-encoder),
 [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo), [libvpx](https://chromium.googlesource.com/webm/libvpx),
 [zstd](https://github.com/facebook/zstd), AMD FidelityFX, NVIDIA Image Scaling, [SDL3](https://github.com/libsdl-org/SDL),
-[Tauri](https://tauri.app), [Zig](https://ziglang.org), [xwin](https://github.com/Jake-Shadle/xwin) and Python, plus
-[Kenney input prompts](https://kenney.nl/assets/input-prompts) and DejaVu fonts. Licences are in
-`runtime/THIRD_PARTY_NOTICES.md`, `recomp/THIRD_PARTY.md` and `tools/shaders/licenses/`.
+[Tauri](https://tauri.app), [Zig](https://ziglang.org), [xwin](https://github.com/Jake-Shadle/xwin) and Python, plus [Kenney input
+prompts](https://kenney.nl/assets/input-prompts) and DejaVu fonts. Licences are in `runtime/THIRD_PARTY_NOTICES.md`,
+`recomp/THIRD_PARTY.md` and `tools/shaders/licenses/`.
 
 ## License
 
