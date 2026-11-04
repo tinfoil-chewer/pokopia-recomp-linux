@@ -265,6 +265,7 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
             *st.progress.lock().unwrap() = p.clone();
             let _ = app.emit("setup-status", p);
         };
+        let mut note: Option<String> = None;
         let result = (|| {
             if package_b && !gamebuild::is_built(&build_job.game_dir) {
                 #[cfg(unix)]
@@ -282,10 +283,38 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
             let tools = shaders::find_tools_linux(&tools_dir, &lt)?;
             #[cfg(not(unix))]
             let tools = shaders::find_tools(&tools_dir)?;
-            shaders::run(&job, &tools, &st.cancel, |p| emit(p))
+            if !shaders::run(&job, &tools, &st.cancel, |p| emit(p))? {
+                return Ok(false);
+            }
+            // Linux: one hidden run records the shaders the game builds while it runs and translates them (linux::warm_up), so the
+            // first start has them, also from Steam. Not fatal: without it the first start records them and Play translates them.
+            #[cfg(unix)]
+            {
+                emit(shaders::Progress {
+                    state: "running".into(),
+                    phase: "warmup".into(),
+                    message: "Running the game once in the background to prepare the shaders it builds while it runs (about a minute)...".into(),
+                    ..Default::default()
+                });
+                if let Err(e) = linux::warm_up(&lt, &job.game_dir, &st.cancel) {
+                    if st.cancel.load(Ordering::SeqCst) {
+                        return Ok(false);
+                    }
+                    note = Some(format!(
+                        " The hidden first run did not finish ({}): the first start records the shaders it builds while it runs, and Play translates them.",
+                        if e.is_empty() { "no details" } else { e.as_str() }
+                    ));
+                }
+            }
+            Ok(true)
         })();
         let end = match result {
-            Ok(true) => shaders::Progress { state: "done".into(), phase: "finish".into(), message: "Setup finished.".into(), ..Default::default() },
+            Ok(true) => shaders::Progress {
+                state: "done".into(),
+                phase: "finish".into(),
+                message: format!("Setup finished.{}", note.unwrap_or_default()),
+                ..Default::default()
+            },
             Ok(false) => shaders::Progress { state: "cancelled".into(), message: "Setup paused. Set up again continues where it stopped.".into(), ..Default::default() },
             Err(e) => shaders::Progress { state: "error".into(), message: e, ..Default::default() },
         };
