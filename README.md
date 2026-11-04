@@ -12,6 +12,9 @@ Windows. The game is still the Windows program the upstream project builds; this
   turned the clouds and sky black (fix from [featureJosh's fork](https://github.com/featureJosh/pokopia-recomp)).
 - **Steam Deck defaults.** It is detected automatically: renders at 720p (60 fps at the title screen, 40-60 in the world) and
   shows controller button prompts.
+- **Name entry with Steam's keyboard.** When the game asks for text, Steam's own on-screen keyboard comes up (Steam Deck,
+  SteamOS, Big Picture) under a small text box; elsewhere an on-screen keyboard drawn in the game takes the pad, mouse or
+  keyboard. No more Windows pop-up, and the whole name reaches the game.
 - **Faster loading from slow storage.** The shaders the game needs at boot are packed into one compressed file, written by
   the game itself after the first start (boot shader wait on a microSD card: ~60 s down to ~10 s).
 - **Fewer stalls under Wine/Proton** (the game's memory is set up so page tracking does not go through wineserver).
