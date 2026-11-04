@@ -19,15 +19,17 @@ on SteamOS and on the Steam Deck.
 - **Your own copy of the game's files**, dumped from a cartridge or console you own: the base game and its **2.0.1a** update.
   Nothing from the game comes with this project.
 - **About 40 GB of free space.**
-- **About 20 minutes for the one-time setup** on a modern desktop (longer on a Steam Deck). It can be paused and continued.
+- **About 20 minutes for the one-time setup** on a modern desktop (about 1¼ hours on a Steam Deck). It can be paused and
+  continued.
 
 ## Getting started
 
 1. Download `PokopiaLauncher-…-x86_64.AppImage` from the [latest release](../../releases/latest). Make it executable
    (right-click, Properties, "Executable", or `chmod +x`) and open it.
 2. Press **Install**. The launcher downloads the parts of the original project it needs and checks them.
-3. Choose the folder with your game files and press **Set up**. It builds the game (about 5 minutes), then prepares the game's
-   graphics (about 15 minutes on a desktop).
+3. Choose the folder with your game files and press **Set up**. It builds the game (about 5 minutes), prepares the game's
+   graphics (about 15 minutes on a desktop), then runs the game once in the background (about a minute) so the first start
+   has everything.
 4. Press **Add to Steam**, then start Steam again so the game shows up in your library.
 5. Press **Play**, or start the game from your Steam library.
 
@@ -38,14 +40,16 @@ The game goes to `~/Games/PokopiaRecomp` unless you pick another folder; your sa
 - Set up on a PC, then copy the whole game folder to the Deck, preferably to the internal SSD (much faster than a microSD
   card). The [detailed guide](linux/README.md#steam-deck) shows how.
 - In Desktop Mode, add `pkp.exe` to Steam as a non-Steam game with Proton Experimental, then play from Game Mode.
-- The Deck is recognised automatically: it renders at 720p, shows controller button prompts, and brings up Steam's on-screen
-  keyboard when the game asks for your name.
-- Expect about 30 fps while playing on a Steam Deck LCD.
+- The Deck is recognised automatically: it plays in the game's handheld mode at 720p, shows controller button prompts, and
+  brings up Steam's on-screen keyboard when the game asks for your name.
+- Expect about 50-55 fps while playing on a Steam Deck LCD.
 
 ## Good to know
 
 - **The first start takes longer** while your graphics driver prepares the game's shaders. Later starts are quick.
 - **Rarely, the very first start stops on "Preparing shaders".** Close the game and start it again.
+- **Settings menu with a controller:** hold **View + Menu** together (the two buttons beside the Deck's screen; - and + on a
+  Switch pad, Back + Start on Xbox). The d-pad moves through it, A selects, B backs out, + closes it. On a keyboard it is F1.
 - **Sprinting can look a little jittery.** That comes from the original project's unlocked frame rate.
 - **On Windows?** Use the [original project](https://github.com/drakolordx7/pokopia-recomp).
 - **Something not working?** [Open an issue](../../issues/new/choose) and attach `pkp.log` from the game folder, with your
@@ -72,8 +76,15 @@ SPIR-V once, during setup, and work on any GPU.
   GPU in step with the game instead, and fixes the depth format AMD lacks (white fog over the ground). Vertex shader outputs
   start at (0,0,0,1) as on the console: the Linux AMD driver left the game's unwritten components as NaN, which turned the clouds
   and sky black (fix from [featureJosh's fork](https://github.com/featureJosh/pokopia-recomp)).
-- **Steam Deck defaults.** Detected from `SteamDeck=1` or the board name: the back end's own scale renders at the window's size,
-  and controller prompts stay on when the trackpads or the on-screen keyboard send mouse or keyboard input.
+- **Faster everywhere:** kernel wait deadlines use the Switch 2's 31.25 MHz tick (they ended 1.63x early; fix from featureJosh's
+  fork): in game on the PC 202 -> 231 fps uncapped.
+- **Steam Deck defaults.** Detected from `SteamDeck=1` or the board name: the game's handheld mode, the back end's own scale at
+  the window's size, short SleepThread waits slept instead of spun (CPU and GPU share one power budget), and controller prompts
+  that stay on when the trackpads or the on-screen keyboard send mouse or keyboard input. Measured on a Deck LCD: ~54 fps in game.
+- **The settings menu with a controller:** View + Menu held together opens it (neither reaches the game), ImGui's gamepad
+  navigation moves through it.
+- **A hidden first run at the end of setup** (an idea from featureJosh's fork): the game plays 60 s headless through Steam's
+  Proton (or Wine) to record the ~212 shaders it builds while it runs, which are then translated.
 - **Name entry.** The Switch 2 keyboard config is read at its packed offsets (UTF-8 answers, so the whole name arrives) and the
   game's name check (`ngc:u`) gets an answer (both from featureJosh's fork). The Win32 prompt is replaced by an on-screen
   keyboard drawn by the overlay; on a Deck, SteamOS or Big Picture it also asks Steam for its keyboard through
@@ -115,9 +126,9 @@ building, and what you are trusting.
 ### Credits
 
 The upstream project by drakolordx7, built on [nxrecomp](https://github.com/drakolordx7/nxrecomp). Fixes from featureJosh's fork
-(vertex output start values, the on-screen keyboard, the Switch 2 keyboard config and name check) keep their authors in the git
-history. Uses code from [Ryujinx](https://github.com/Ryubing/Ryujinx), [Mesa](https://gitlab.freedesktop.org/mesa/mesa),
-smo-recomp, ScarletNX, ssbu-recomp, SuperMarioWonderRecomp, yuzu, Eden, libnx,
+(vertex output start values, wait deadlines, the on-screen keyboard, the Switch 2 keyboard config and name check) keep their
+authors in the git history. Uses code from [Ryujinx](https://github.com/Ryubing/Ryujinx),
+[Mesa](https://gitlab.freedesktop.org/mesa/mesa), smo-recomp, ScarletNX, ssbu-recomp, SuperMarioWonderRecomp, yuzu, Eden, libnx,
 [astc-encoder](https://github.com/ARM-software/astc-encoder), [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo),
 [libvpx](https://chromium.googlesource.com/webm/libvpx), [zstd](https://github.com/facebook/zstd), AMD FidelityFX, NVIDIA Image
 Scaling, [SDL3](https://github.com/libsdl-org/SDL), [Tauri](https://tauri.app), [Zig](https://ziglang.org),
