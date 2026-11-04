@@ -40,7 +40,7 @@ The game goes to `~/Games/PokopiaRecomp` unless you pick another folder; your sa
 - In Desktop Mode, add `pkp.exe` to Steam as a non-Steam game with Proton Experimental, then play from Game Mode.
 - The Deck is recognised automatically: it renders at 720p, shows controller button prompts, and brings up Steam's on-screen
   keyboard when the game asks for your name.
-- Expect 60 fps at the title screen and 40-60 fps while playing.
+- Expect about 30 fps while playing on a Steam Deck LCD.
 
 ## Good to know
 
