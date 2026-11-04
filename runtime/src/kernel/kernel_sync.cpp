@@ -74,10 +74,11 @@ void unlock_mutex(uint64_t addr) {
     wake_thread(*next);
 }
 
-// Monotonic nanoseconds from the 19.2 MHz tick (1 tick = 625/12 ns).
+// Monotonic nanoseconds from the registered console's tick frequency, split so the multiplication cannot overflow.
 int64_t now_ns() {
     const uint64_t t = system_tick();
-    return static_cast<int64_t>(t / 12 * 625 + t % 12 * 625 / 12);
+    const uint64_t hz = tick_hz();
+    return static_cast<int64_t>((t / hz) * 1000000000ull + (t % hz) * 1000000000ull / hz);
 }
 
 // set_blocked_hook: the host thread that runs a hook while it is blocked in a kernel wait, and the hook.
