@@ -19,15 +19,15 @@ on SteamOS and on the Steam Deck.
 - **Your own copy of the game's files**, dumped from a cartridge or console you own: the base game and its **2.0.1a** update.
   Nothing from the game comes with this project.
 - **About 40 GB of free space.**
-- **An hour or two for the one-time setup.** It can be paused and continued.
+- **About 20 minutes for the one-time setup** on a modern desktop (longer on a Steam Deck). It can be paused and continued.
 
 ## Getting started
 
 1. Download `PokopiaLauncher-…-x86_64.AppImage` from the [latest release](../../releases/latest). Make it executable
    (right-click, Properties, "Executable", or `chmod +x`) and open it.
 2. Press **Install**. The launcher downloads the parts of the original project it needs and checks them.
-3. Choose the folder with your game files and press **Set up**. It builds the game (about 10 minutes), then prepares the game's
-   graphics (1-2 hours on a desktop).
+3. Choose the folder with your game files and press **Set up**. It builds the game (about 5 minutes), then prepares the game's
+   graphics (about 15 minutes on a desktop).
 4. Press **Add to Steam**, then start Steam again so the game shows up in your library.
 5. Press **Play**, or start the game from your Steam library.
 
