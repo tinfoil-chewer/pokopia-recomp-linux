@@ -674,6 +674,23 @@ NXTEST(wait_for_address_timeout_and_decrement) {
     end();
 }
 
+// Play mode installs a blocked hook on its window thread, which cuts kernel waits into 10 ms slices. Each slice rechecks the absolute
+// deadline, so this catches a deadline clock whose tick-to-nanosecond conversion does not match the registered console's tick rate.
+// With Pokopia's 31.25 MHz Switch 2 clock interpreted as 19.2 MHz, the 100 ms wait below returned after about 63 ms.
+NXTEST(wait_for_address_blocked_hook_preserves_timeout) {
+    begin();
+    alignas(4) uint32_t w = 0;
+    ks::set_blocked_hook(GetCurrentThreadId(), +[] {});
+    const auto t0 = Clock::now();
+    const uint32_t rc = ks::wait_for_address(addr_of(&w), 2, 0, 100 * kMs);
+    const double el = ms_since(t0);
+    ks::set_blocked_hook(0, nullptr);
+    CHECK_EQ(rc, ks::kTimedOut);
+    CHECK_MSG(slept_at_least(el, 100.0), "a sliced 100 ms wait returned before 100 ms");
+    CHECK_MSG(el < 2000.0, "a sliced 100 ms wait took far longer than 100 ms");
+    end();
+}
+
 // ---- 12: SignalToAddress type 0 wakes `count` ----------------------------------------------------------------------------
 
 NXTEST(signal_to_address_wakes_count) {
